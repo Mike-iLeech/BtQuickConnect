@@ -30,7 +30,10 @@ internal sealed class Settings
     public void Save()
     {
         Directory.CreateDirectory(Dir);
-        File.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+        // через временный файл: оборванная запись (убитый процесс, сбой питания) не портит настройки
+        string tmp = FilePath + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+        File.Move(tmp, FilePath, overwrite: true);
     }
 }
 

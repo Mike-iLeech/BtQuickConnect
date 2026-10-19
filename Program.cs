@@ -21,7 +21,13 @@ internal static class Program
             ApplicationConfiguration.Initialize();
             using (var app = new TrayApp(updatedFrom, rolledBack))
             {
-                if (updatedFrom != null) Updater.SignalReady();   // старая версия ждёт этого, чтобы выйти
+                if (updatedFrom != null)
+                {
+                    // «готово» — только когда цикл сообщений реально заработал; старая версия ждёт этого, чтобы выйти
+                    EventHandler? onIdle = null;
+                    onIdle = (_, _) => { Application.Idle -= onIdle; Updater.SignalReady(); };
+                    Application.Idle += onIdle;
+                }
                 Task.Run(Updater.Cleanup);
                 Application.Run();
                 handoff = app.Handoff;

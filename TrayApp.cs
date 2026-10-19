@@ -27,6 +27,7 @@ internal sealed class TrayApp : IDisposable
     private readonly System.Windows.Forms.Timer _updateTimer = new() { Interval = 30_000 };
     private ReleaseInfo? _pendingUpdate;
     private bool _updating;
+    private readonly Version? _rolledBack;
     private string? _lastAutoError;   // фоновая ошибка показывается один раз, а не каждые 6 часов
 
     /// <summary>Запущенная новая версия; Program дождётся её отклика после выхода из цикла сообщений.</summary>
@@ -53,6 +54,7 @@ internal sealed class TrayApp : IDisposable
         _blink.Tick += (_, _) => OnBlink();
         _poll = new System.Threading.Timer(_ => Poll(), null, 0, 2000);
 
+        _rolledBack = Updater.ParseVersion(rolledBack);
         if (rolledBack != null)
         {
             // новая версия не запустилась — автоматически больше её не ставим (вручную из меню можно)
@@ -65,7 +67,8 @@ internal sealed class TrayApp : IDisposable
         if (!_hotkeys.Apply(_settings.Hotkey, out string hkErr))
             Balloon("Кнопка подключения не работает", hkErr + " Назначьте другую через меню.", ToolTipIcon.Warning);
         else if (rolledBack != null)
-            Balloon("Обновление отменено", $"Версия {rolledBack} не запустилась — возвращена {Updater.Current.ToString(3)}.",
+            Balloon("Обновление отменено",
+                $"Версия {_rolledBack?.ToString(3) ?? rolledBack} не запустилась — возвращена {Updater.Current.ToString(3)}.",
                 ToolTipIcon.Warning);
         else if (updatedFrom != null)
             Balloon("BT Quick Connect обновлён", $"Установлена версия {Updater.Current.ToString(3)}.", ToolTipIcon.Info);
@@ -106,7 +109,8 @@ internal sealed class TrayApp : IDisposable
         }
 
         _pendingUpdate = r;
-        bool skipped = Updater.ParseVersion(_settings.SkippedUpdate) == r.Version;
+        // в памяти тоже: если настройки не сохранились, откатившаяся версия всё равно не ставится по кругу
+        bool skipped = Updater.ParseVersion(_settings.SkippedUpdate) == r.Version || _rolledBack == r.Version;
         if (manual || (_settings.AutoUpdate && !skipped)) InstallUpdate(r, manual);
         else if (_lastAutoError != "offer:" + r.Tag)
         {
@@ -313,7 +317,9 @@ internal sealed class TrayApp : IDisposable
         _menu.Items.Add(new ToolStripSeparator());
 
         var choose = new ToolStripMenuItem("Выбрать устройство");
-        var devices = Bluetooth.GetPairedDevices() ?? _devices;
+        List<BtDevice>? devices;
+        try { devices = Bluetooth.GetPairedDevices() ?? _devices; }
+        catch { devices = _devices; }   // стек Bluetooth недоступен — показываем последний опрос
         if (devices == null || devices.Count == 0)
         {
             choose.DropDownItems.Add(new ToolStripMenuItem(
