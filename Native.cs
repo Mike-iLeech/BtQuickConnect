@@ -41,6 +41,20 @@ internal static class Native
         public string szName;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BLUETOOTH_FIND_RADIO_PARAMS { public uint dwSize; }
+
+    [DllImport("bthprops.cpl", SetLastError = true)]
+    public static extern IntPtr BluetoothFindFirstRadio(ref BLUETOOTH_FIND_RADIO_PARAMS p, out IntPtr hRadio);
+
+    [DllImport("bthprops.cpl", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool BluetoothFindRadioClose(IntPtr hFind);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool CloseHandle(IntPtr h);
+
     [DllImport("bthprops.cpl", SetLastError = true)]
     public static extern IntPtr BluetoothFindFirstDevice(ref BLUETOOTH_DEVICE_SEARCH_PARAMS p, ref BLUETOOTH_DEVICE_INFO info);
 

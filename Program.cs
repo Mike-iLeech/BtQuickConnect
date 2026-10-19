@@ -5,23 +5,42 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
-        // после автообновления старая копия ещё выходит и держит мьютекс — подождём её
-        int i = Array.IndexOf(args, Updater.UpdatedFlag);
-        string? updatedFrom = i >= 0 && i + 1 < args.Length ? args[i + 1] : i >= 0 ? "" : null;
+        string? updatedFrom = FlagValue(args, Updater.UpdatedFlag);
+        string? rolledBack = FlagValue(args, Updater.RolledBackFlag);
 
-        using var mutex = new Mutex(false, @"Local\BtQuickConnect.SingleInstance");
+        // после обновления старая копия отдаёт мьютекс не сразу — подождём её
+        var mutex = new Mutex(false, @"Local\BtQuickConnect.SingleInstance");
         bool owned;
-        try { owned = mutex.WaitOne(updatedFrom != null ? 15000 : 0); }
+        try { owned = mutex.WaitOne(updatedFrom != null || rolledBack != null ? 30_000 : 0); }
         catch (AbandonedMutexException) { owned = true; }
-        if (!owned) return;
+        if (!owned) { mutex.Dispose(); return; }
 
+        UpdateHandoff? handoff;
         try
         {
-            Task.Run(Updater.Cleanup);
             ApplicationConfiguration.Initialize();
-            using var app = new TrayApp(updatedFrom);
-            Application.Run();
+            using (var app = new TrayApp(updatedFrom, rolledBack))
+            {
+                if (updatedFrom != null) Updater.SignalReady();   // старая версия ждёт этого, чтобы выйти
+                Task.Run(Updater.Cleanup);
+                Application.Run();
+                handoff = app.Handoff;
+            }
         }
-        finally { mutex.ReleaseMutex(); }
+        finally
+        {
+            mutex.ReleaseMutex();
+            mutex.Dispose();
+        }
+
+        // значок убран, мьютекс и кнопки отпущены — новая версия может стартовать; ждём её отклика
+        if (handoff != null) Updater.ConfirmOrRollback(handoff);
+    }
+
+    /// <summary>Значение после флага: "--updated 1.0.0" → "1.0.0"; флаг без значения → "".</summary>
+    private static string? FlagValue(string[] args, string flag)
+    {
+        int i = Array.IndexOf(args, flag);
+        return i < 0 ? null : i + 1 < args.Length ? args[i + 1] : "";
     }
 }

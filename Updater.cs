@@ -10,6 +10,9 @@ internal sealed record ReleaseInfo(Version Version, string Tag, string PageUrl, 
 
 internal sealed class UpdateException(string message, Exception? inner = null) : Exception(message, inner);
 
+/// <summary>Запущенная новая версия, которая ещё должна отозваться.</summary>
+internal sealed record UpdateHandoff(Process Process, EventWaitHandle Ready, string ExePath, Version Version);
+
 /// <summary>
 /// Автообновление из GitHub Releases.
 /// Работающий EXE нельзя перезаписать, но можно переименовать: текущий уходит в .old,
@@ -20,6 +23,8 @@ internal static class Updater
     public const string Repo = "Mike-iLeech/BtQuickConnect";
     public const string AssetName = "BtQuickConnect.exe";
     public const string UpdatedFlag = "--updated";
+    public const string RolledBackFlag = "--rolled-back";
+    public const string ReadyEventName = @"Local\BtQuickConnect.UpdateReady";
     private const string ApiLatest = $"https://api.github.com/repos/{Repo}/releases/latest";
 
     public static Version Current { get; } = Normalize(Assembly.GetExecutingAssembly().GetName().Version ?? new Version(0, 0));
@@ -33,13 +38,20 @@ internal static class Updater
         return c;
     }
 
-    /// <summary>Обновлять на месте можно только собранный EXE, а не запуск через dotnet.exe.</summary>
+    /// <summary>
+    /// Обновлять на месте можно только опубликованный однофайловый EXE. У dotnet run / отладки
+    /// в bin тоже есть BtQuickConnect.exe, но сборка там лежит отдельным файлом (Location не пуст).
+    /// </summary>
     public static string? ExePath
     {
         get
         {
             string? p = Environment.ProcessPath;
-            return p != null && Path.GetFileName(p).Equals(AssetName, StringComparison.OrdinalIgnoreCase) ? p : null;
+#pragma warning disable IL3000 // в однофайловом EXE Location пуст — именно это и проверяем
+            bool singleFile = string.IsNullOrEmpty(typeof(Updater).Assembly.Location);
+#pragma warning restore IL3000
+            return singleFile && p != null && Path.GetFileName(p).Equals(AssetName, StringComparison.OrdinalIgnoreCase)
+                ? p : null;
         }
     }
 
@@ -97,8 +109,12 @@ internal static class Updater
                 throw new UpdateException("GitHub временно ограничил число запросов.");
             if (!resp.IsSuccessStatusCode)
                 throw new UpdateException($"GitHub ответил ошибкой {(int)resp.StatusCode}.");
-            try { return ParseRelease(await resp.Content.ReadAsStringAsync(ct)); }
-            catch (JsonException e) { throw new UpdateException("Не удалось разобрать ответ GitHub.", e); }
+            string body;
+            try { body = await resp.Content.ReadAsStringAsync(ct); }
+            catch (Exception e) { throw new UpdateException("Связь с GitHub оборвалась.", e); }
+            try { return ParseRelease(body); }
+            catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException)
+            { throw new UpdateException("Не удалось разобрать ответ GitHub.", e); }
         }
     }
 
@@ -140,8 +156,74 @@ internal static class Updater
         }
     }
 
-    /// <summary>Подменяет EXE и запускает новую версию; после успешного возврата вызывающий должен выйти.</summary>
-    public static void InstallAndRestart(string newFile, string exePath)
+    /// <summary>
+    /// Подменяет EXE и запускает новую версию. Вызывающий после этого убирает значок, отпускает мьютекс
+    /// и вызывает <see cref="ConfirmOrRollback"/>: новая версия должна отозваться, иначе вернётся старая.
+    /// </summary>
+    public static UpdateHandoff InstallAndStart(string newFile, string exePath, Version version)
+    {
+        var ready = new EventWaitHandle(false, EventResetMode.ManualReset, ReadyEventName);
+        try
+        {
+            ready.Reset();
+            var proc = InstallAndRestart(newFile, exePath);
+            return new UpdateHandoff(proc, ready, exePath, version);
+        }
+        catch
+        {
+            ready.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Ждёт, пока новая версия отзовётся через <see cref="ReadyEventName"/>. Не отозвалась или упала —
+    /// гасит её, возвращает старый EXE и запускает его. true — обновление прижилось.
+    /// </summary>
+    public static bool ConfirmOrRollback(UpdateHandoff h, TimeSpan? timeout = null)
+    {
+        using var _ = h.Ready;
+        var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(45));
+        while (DateTime.UtcNow < deadline)
+        {
+            if (h.Ready.WaitOne(250)) return true;
+            if (h.Process.HasExited) break;
+        }
+
+        try
+        {
+            if (!h.Process.HasExited) { h.Process.Kill(); h.Process.WaitForExit(5000); }
+        }
+        catch { /* уже вышла */ }
+
+        if (!Rollback(h.ExePath)) return false;
+        try
+        {
+            Process.Start(new ProcessStartInfo(h.ExePath, $"{RolledBackFlag} {h.Version}") { UseShellExecute = false });
+        }
+        catch { /* старая версия на месте — запустится при следующем входе */ }
+        return false;
+    }
+
+    /// <summary>Возвращает .old на место EXE (неудачная новая версия удаляется).</summary>
+    public static bool Rollback(string exePath)
+    {
+        string old = exePath + ".old";
+        if (!File.Exists(old)) return false;
+        for (int i = 0; i < 20; i++)
+        {
+            try
+            {
+                File.Move(old, exePath, overwrite: true);
+                return true;
+            }
+            catch (IOException) { Thread.Sleep(250); }       // упавший процесс ещё держит файл
+            catch (UnauthorizedAccessException) { Thread.Sleep(250); }
+        }
+        return false;
+    }
+
+    internal static Process InstallAndRestart(string newFile, string exePath)
     {
         string old = exePath + ".old";
         TryDelete(old);
@@ -167,25 +249,34 @@ internal static class Updater
 
         try
         {
-            Process.Start(new ProcessStartInfo(exePath, $"{UpdatedFlag} {Current}") { UseShellExecute = false });
+            return Process.Start(new ProcessStartInfo(exePath, $"{UpdatedFlag} {Current}") { UseShellExecute = false })
+                   ?? throw new UpdateException("Новая версия не запустилась.");
         }
         catch (Exception e)
         {
             // новая версия не стартует — возвращаем старую на место
             try { File.Move(exePath, newFile, true); File.Move(old, exePath); } catch { }
             TryDelete(newFile);
-            throw new UpdateException("Новая версия не запустилась: " + e.Message, e);
+            throw e as UpdateException ?? new UpdateException("Новая версия не запустилась: " + e.Message, e);
         }
+    }
+
+    /// <summary>Новая версия отзывается старой: «я запустилась», после этого старая выходит окончательно.</summary>
+    public static void SignalReady()
+    {
+        if (EventWaitHandle.TryOpenExisting(ReadyEventName, out var ev))
+            using (ev) ev.Set();
     }
 
     /// <summary>Удаляет .old/.new, оставшиеся от прошлого обновления.</summary>
     public static void Cleanup()
     {
         if (ExePath is not { } exe) return;
-        for (int i = 0; i < 10 && File.Exists(exe + ".old"); i++)
+        // старый процесс запущен из .old и выходит только после нашего сигнала — ждём до минуты
+        for (int i = 0; i < 120 && File.Exists(exe + ".old"); i++)
         {
             TryDelete(exe + ".old");
-            if (File.Exists(exe + ".old")) Thread.Sleep(300);   // старый процесс ещё выходит
+            if (File.Exists(exe + ".old")) Thread.Sleep(500);
         }
         TryDelete(exe + ".new");
     }

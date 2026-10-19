@@ -40,6 +40,39 @@ public class SettingsTests
     public void KeysWithoutModifiers(Keys k, bool allowed) =>
         Assert.Equal(allowed, HotkeyBinding.AllowedWithoutModifiers(k));
 
+    private static object[] K(Keys k, int mods = 0) => new object[] { k, MouseButtons.None, mods };
+    private static object[] M(MouseButtons b, int mods = 0) => new object[] { Keys.None, b, mods };
+    private const int C = HotkeyBinding.ModCtrl, A = HotkeyBinding.ModAlt, S = HotkeyBinding.ModShift, W = HotkeyBinding.ModWin;
+
+    public static IEnumerable<object[]> Bindings => new (object[] b, bool ok)[]
+    {
+        (K(Keys.B, C | A), true),
+        (K(Keys.F13), true),
+        (K(Keys.MediaPlayPause), true),
+        (K(Keys.F9, S), true),
+        (K(Keys.B, W), true),
+        (K(Keys.B), false),
+        (K(Keys.B, S), false),          // Shift+буква = заглавная буква
+        (K(Keys.D1, S), false),         // «!»
+        (K(Keys.Space, S), false),
+        (K(Keys.OemPeriod, S), false),
+        (K(Keys.Escape), false),
+        (K(Keys.F4, A), false),         // закрыть окно
+        (K(Keys.Tab, A), false),
+        (K(Keys.C, C), false),
+        (K(Keys.V, C), false),
+        (K(Keys.Delete, C | A), false),
+        (M(MouseButtons.XButton1), true),
+        (M(MouseButtons.Middle, C), true),
+        (M(MouseButtons.Middle), false), // вкладки и ссылки
+        (M(MouseButtons.Left, C), false),
+    }.Select(x => x.b.Append(x.ok).ToArray());
+
+    [Theory]
+    [MemberData(nameof(Bindings))]
+    public void Validate(Keys key, MouseButtons mouse, int mods, bool ok) =>
+        Assert.Equal(ok, HotkeyBinding.Validate(new HotkeyBinding { Key = key, Mouse = mouse, Modifiers = mods }) == null);
+
     [Fact]
     public void Binding_Names()
     {

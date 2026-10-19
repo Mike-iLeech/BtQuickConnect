@@ -13,6 +13,7 @@ internal sealed class TrayApp : IDisposable
     private readonly Icon _dimIcon;
     private readonly HotkeyManager _hotkeys;
     private HotkeyForm? _hotkeyForm;
+    private readonly Font _boldFont;
 
     private readonly Settings _settings = Settings.Load();
     private List<BtDevice>? _devices = new();
@@ -26,8 +27,12 @@ internal sealed class TrayApp : IDisposable
     private readonly System.Windows.Forms.Timer _updateTimer = new() { Interval = 30_000 };
     private ReleaseInfo? _pendingUpdate;
     private bool _updating;
+    private string? _lastAutoError;   // фоновая ошибка показывается один раз, а не каждые 6 часов
 
-    public TrayApp(string? updatedFrom = null)
+    /// <summary>Запущенная новая версия; Program дождётся её отклика после выхода из цикла сообщений.</summary>
+    public UpdateHandoff? Handoff { get; private set; }
+
+    public TrayApp(string? updatedFrom = null, string? rolledBack = null)
     {
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
 
@@ -36,6 +41,7 @@ internal sealed class TrayApp : IDisposable
         _icons[LedState.Orange] = IconArt.MakeIcon(s, IconArt.Orange);
         _icons[LedState.Green] = IconArt.MakeIcon(s, IconArt.Green);
         _dimIcon = IconArt.MakeIcon(s, IconArt.Dim);
+        _boldFont = new Font(_menu.Font, FontStyle.Bold);
 
         _menu.Opening += (_, _) => BuildMenu();
         _tray.ContextMenuStrip = _menu;
@@ -47,10 +53,20 @@ internal sealed class TrayApp : IDisposable
         _blink.Tick += (_, _) => OnBlink();
         _poll = new System.Threading.Timer(_ => Poll(), null, 0, 2000);
 
+        if (rolledBack != null)
+        {
+            // новая версия не запустилась — автоматически больше её не ставим (вручную из меню можно)
+            _settings.SkippedUpdate = rolledBack;
+            TrySave();
+        }
+
         _hotkeys = new HotkeyManager(_ui);
         _hotkeys.Pressed += ConnectSelected;
         if (!_hotkeys.Apply(_settings.Hotkey, out string hkErr))
             Balloon("Кнопка подключения не работает", hkErr + " Назначьте другую через меню.", ToolTipIcon.Warning);
+        else if (rolledBack != null)
+            Balloon("Обновление отменено", $"Версия {rolledBack} не запустилась — возвращена {Updater.Current.ToString(3)}.",
+                ToolTipIcon.Warning);
         else if (updatedFrom != null)
             Balloon("BT Quick Connect обновлён", $"Установлена версия {Updater.Current.ToString(3)}.", ToolTipIcon.Info);
 
@@ -67,7 +83,7 @@ internal sealed class TrayApp : IDisposable
 
     private async void CheckUpdates(bool manual)
     {
-        if (_updating) return;
+        if (_updating || Handoff != null) return;
         if (Updater.ExePath == null)
         {
             if (manual) Balloon("Обновление", "Обновляется только собранный BtQuickConnect.exe.", ToolTipIcon.Info);
@@ -75,9 +91,10 @@ internal sealed class TrayApp : IDisposable
         }
         ReleaseInfo? r;
         try { r = await Updater.FetchLatestAsync(); }
-        catch (UpdateException e)
+        catch (Exception e)   // async void: всё, что вылетит отсюда, уронит приложение окном ошибки
         {
-            if (manual) Balloon("Не удалось проверить обновления", e.Message, ToolTipIcon.Warning);
+            string msg = e is UpdateException ? e.Message : "Не удалось проверить обновления: " + e.Message;
+            if (manual) Balloon("Не удалось проверить обновления", msg, ToolTipIcon.Warning);
             return;
         }
 
@@ -89,30 +106,39 @@ internal sealed class TrayApp : IDisposable
         }
 
         _pendingUpdate = r;
-        if (manual || _settings.AutoUpdate) InstallUpdate(r, manual);
-        else Balloon("Доступно обновление", $"Версия {r.Version.ToString(3)}: ПКМ по значку → «Установить обновление».", ToolTipIcon.Info);
+        bool skipped = Updater.ParseVersion(_settings.SkippedUpdate) == r.Version;
+        if (manual || (_settings.AutoUpdate && !skipped)) InstallUpdate(r, manual);
+        else if (_lastAutoError != "offer:" + r.Tag)
+        {
+            _lastAutoError = "offer:" + r.Tag;
+            Balloon("Доступно обновление", $"Версия {r.Version.ToString(3)}: ПКМ по значку → «Установить обновление».", ToolTipIcon.Info);
+        }
     }
 
     private async void InstallUpdate(ReleaseInfo r, bool manual)
     {
         // не перезапускаемся посреди подключения или записи кнопки — дождёмся следующей проверки
-        if (_updating || Updater.ExePath is not { } exe) return;
+        if (_updating || Handoff != null || Updater.ExePath is not { } exe) return;
         if (!manual && (_busy || _hotkeyForm != null)) return;
 
         _updating = true;
         try
         {
             string file = await Updater.DownloadAsync(r, exe);
-            Updater.InstallAndRestart(file, exe);
+            Handoff = Updater.InstallAndStart(file, exe, r.Version);
             Exit();
         }
-        catch (UpdateException e)
+        catch (Exception e)
         {
-            Balloon("Обновление не установлено", e.Message, ToolTipIcon.Warning);
+            string msg = e is UpdateException ? e.Message : "Не удалось установить обновление: " + e.Message;
+            if (manual || _lastAutoError != r.Tag + msg)
+            {
+                _lastAutoError = r.Tag + msg;
+                Balloon("Обновление не установлено", msg, ToolTipIcon.Warning);
+            }
         }
         finally { _updating = false; }
     }
-
     // ---------- состояние ----------
 
     private void Poll()
@@ -208,7 +234,7 @@ internal sealed class TrayApp : IDisposable
                     StopBusy();
                     Balloon("Не удалось подключиться", err, ToolTipIcon.Warning);
                 }
-                Poll();
+                Task.Run(Poll);
             }, null);
         });
     }
@@ -223,7 +249,7 @@ internal sealed class TrayApp : IDisposable
             _ui.Post(_ =>
             {
                 if (r != KsResult.Ok) Balloon("Не удалось отключить", err, ToolTipIcon.Warning);
-                Poll();
+                Task.Run(Poll);
             }, null);
         });
     }
@@ -264,7 +290,10 @@ internal sealed class TrayApp : IDisposable
 
     private void BuildMenu()
     {
+        // пункты и их картинки пересоздаются при каждом открытии — старые освобождаем сразу
+        var old = _menu.Items.Cast<ToolStripItem>().ToList();
         _menu.Items.Clear();
+        foreach (var item in old) DisposeItem(item);
         var sel = Selected;
 
         var header = new ToolStripMenuItem(TooltipText()) { Enabled = false };
@@ -274,7 +303,7 @@ internal sealed class TrayApp : IDisposable
         var connect = new ToolStripMenuItem("Подключить", null, (_, _) => ConnectSelected())
         {
             Enabled = !_busy && sel is { Connected: false },
-            Font = new Font(_menu.Font, FontStyle.Bold),
+            Font = _boldFont,
         };
         _menu.Items.Add(connect);
         _menu.Items.Add(new ToolStripMenuItem("Отключить", null, (_, _) => DisconnectSelected())
@@ -343,6 +372,20 @@ internal sealed class TrayApp : IDisposable
         try { return Autostart.Enabled; } catch { return false; }
     }
 
+    private static void DisposeItem(ToolStripItem item)
+    {
+        if (item is ToolStripMenuItem mi)
+        {
+            var subs = mi.DropDownItems.Cast<ToolStripItem>().ToList();
+            mi.DropDownItems.Clear();
+            foreach (var s in subs) DisposeItem(s);
+        }
+        var img = item.Image;
+        item.Image = null;
+        img?.Dispose();
+        item.Dispose();
+    }
+
     private void Select(BtDevice? d)
     {
         _settings.Address = d?.Address;
@@ -350,7 +393,7 @@ internal sealed class TrayApp : IDisposable
         TrySave();
         if (_busy) StopBusy();
         Apply(_devices);
-        Poll();
+        Task.Run(Poll);
     }
 
     private void EditHotkey()
@@ -369,7 +412,8 @@ internal sealed class TrayApp : IDisposable
 
                 if (result != DialogResult.OK)
                 {
-                    _hotkeys.Apply(_settings.Hotkey, out _);   // вернуть прежнее назначение
+                    if (!_hotkeys.Apply(_settings.Hotkey, out string restoreErr))   // вернуть прежнее назначение
+                        Balloon("Кнопка подключения не работает", restoreErr, ToolTipIcon.Warning);
                     return;
                 }
                 var chosen = form.Cleared ? null : form.Result;
@@ -409,5 +453,6 @@ internal sealed class TrayApp : IDisposable
         _menu.Dispose();
         foreach (var i in _icons.Values) i.Dispose();
         _dimIcon.Dispose();
+        _boldFont.Dispose();
     }
 }

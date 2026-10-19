@@ -13,6 +13,9 @@ internal static class Bluetooth
     /// <summary>Спаренные (запомненные) классические Bluetooth-устройства. null — нет адаптера / Bluetooth выключен.</summary>
     public static List<BtDevice>? GetPairedDevices()
     {
+        // без включённого адаптера список запомненных устройств бывает непустым — огонёк должен быть красным
+        if (!RadioPresent()) return null;
+
         var p = new BLUETOOTH_DEVICE_SEARCH_PARAMS
         {
             dwSize = (uint)Marshal.SizeOf<BLUETOOTH_DEVICE_SEARCH_PARAMS>(),
@@ -43,6 +46,16 @@ internal static class Bluetooth
         }
         finally { BluetoothFindDeviceClose(h); }
         return list;
+    }
+
+    private static bool RadioPresent()
+    {
+        var p = new BLUETOOTH_FIND_RADIO_PARAMS { dwSize = (uint)Marshal.SizeOf<BLUETOOTH_FIND_RADIO_PARAMS>() };
+        IntPtr find = BluetoothFindFirstRadio(ref p, out IntPtr radio);
+        if (find == IntPtr.Zero) return false;
+        CloseHandle(radio);
+        BluetoothFindRadioClose(find);
+        return true;
     }
 
     private static BLUETOOTH_DEVICE_INFO NewInfo() =>

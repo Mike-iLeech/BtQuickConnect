@@ -61,6 +61,41 @@ internal sealed class HotkeyBinding
         or >= Keys.BrowserBack and <= Keys.LaunchApplication2
         or Keys.Pause or Keys.Scroll;
 
+    /// <summary>Клавиши, которые печатают или управляют вводом: с ними нужен Ctrl, Alt или Win (одного Shift мало).</summary>
+    private static bool IsTypingKey(Keys k) =>
+        k is >= Keys.A and <= Keys.Z or >= Keys.D0 and <= Keys.D9 or >= Keys.NumPad0 and <= Keys.Divide
+        or >= Keys.Oem1 and <= Keys.Oem102
+        or Keys.Space or Keys.Enter or Keys.Tab or Keys.Back or Keys.Delete or Keys.Insert
+        or Keys.Home or Keys.End or Keys.PageUp or Keys.PageDown or Keys.Left or Keys.Right or Keys.Up or Keys.Down;
+
+    /// <summary>Системные сочетания, которые нельзя отбирать у Windows и программ.</summary>
+    private static bool IsReserved(Keys k, int mods) =>
+        (mods == ModAlt && k is Keys.F4 or Keys.Tab or Keys.Escape or Keys.Space)
+        || (mods == ModCtrl && k is Keys.Escape or Keys.A or Keys.C or Keys.V or Keys.X or Keys.Z or Keys.Y or Keys.S)
+        || (mods == (ModCtrl | ModShift) && k == Keys.Escape)
+        || (mods == (ModCtrl | ModAlt) && k == Keys.Delete);
+
+    /// <summary>null — назначение годится; иначе — почему нет.</summary>
+    public static string? Validate(HotkeyBinding b)
+    {
+        int strong = b.Modifiers & (ModCtrl | ModAlt | ModWin);
+        if (b.IsMouse)
+        {
+            if (b.Mouse is not (MouseButtons.Middle or MouseButtons.XButton1 or MouseButtons.XButton2))
+                return "Левую и правую кнопки мыши назначить нельзя.";
+            if (b.Mouse == MouseButtons.Middle && b.Modifiers == 0)
+                return "Средняя кнопка без модификатора нужна для вкладок и ссылок. Зажмите Ctrl, Alt, Shift или Win.";
+            return null;
+        }
+        if (IsReserved(b.Key, b.Modifiers))
+            return $"«{b}» — системное сочетание, его занимать нельзя.";
+        if (IsTypingKey(b.Key) && strong == 0)
+            return $"«{b}» мешала бы печатать. Добавьте Ctrl, Alt или Win.";
+        if (b.Modifiers == 0 && !AllowedWithoutModifiers(b.Key) && !IsTypingKey(b.Key))
+            return $"«{b}» без модификатора мешала бы работе. Добавьте Ctrl, Alt, Shift или Win.";
+        return null;
+    }
+
     public static int CurrentModifiers()
     {
         int m = 0;

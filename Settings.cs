@@ -9,6 +9,8 @@ internal sealed class Settings
     public string? Name { get; set; }
     public HotkeyBinding? Hotkey { get; set; }
     public bool AutoUpdate { get; set; } = true;
+    /// <summary>Версия, которая однажды не запустилась: автоматически её больше не ставим.</summary>
+    public string? SkippedUpdate { get; set; }
 
     private static readonly string Dir =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "BtQuickConnect");

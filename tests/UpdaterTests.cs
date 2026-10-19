@@ -73,9 +73,10 @@ public class UpdaterTests : IDisposable
         for (int port = 49_500; ; port++)
         {
             var l = new HttpListener();
-            l.Prefixes.Add($"http://127.0.0.1:{port}/");
+            // localhost можно слушать без прав администратора; 20 занятых портов подряд — честная ошибка, а не зависание
+            l.Prefixes.Add($"http://localhost:{port}/");
             try { l.Start(); }
-            catch (HttpListenerException) { l.Close(); continue; }
+            catch (HttpListenerException) when (port < 49_520) { l.Close(); continue; }
             _ = Task.Run(async () =>
             {
                 try
@@ -90,7 +91,7 @@ public class UpdaterTests : IDisposable
                 }
                 catch { /* слушатель закрыт */ }
             });
-            return (l, $"http://127.0.0.1:{port}/BtQuickConnect.exe");
+            return (l, $"http://localhost:{port}/BtQuickConnect.exe");
         }
     }
 
@@ -120,7 +121,8 @@ public class UpdaterTests : IDisposable
         string exe = Path.Combine(_dir, "BtQuickConnect.exe");
         var r = new ReleaseInfo(new Version(9, 0, 0, 0), "v9", "", url, body.Length, new string('0', 64));
 
-        await Assert.ThrowsAsync<UpdateException>(() => Updater.DownloadAsync(r, exe));
+        var e = await Assert.ThrowsAsync<UpdateException>(() => Updater.DownloadAsync(r, exe));
+        Assert.Contains("Контрольная сумма", e.Message);   // именно сверка, а не сетевая ошибка
         Assert.False(File.Exists(exe + ".new"));
     }
 
@@ -133,7 +135,8 @@ public class UpdaterTests : IDisposable
         string exe = Path.Combine(_dir, "BtQuickConnect.exe");
         var r = new ReleaseInfo(new Version(9, 0, 0, 0), "v9", "", url, body.Length + 1, Sha(body));
 
-        await Assert.ThrowsAsync<UpdateException>(() => Updater.DownloadAsync(r, exe));
+        var e = await Assert.ThrowsAsync<UpdateException>(() => Updater.DownloadAsync(r, exe));
+        Assert.Contains("не полностью", e.Message);
         Assert.False(File.Exists(exe + ".new"));
     }
 
@@ -177,5 +180,59 @@ public class UpdaterTests : IDisposable
         Assert.Equal("old", File.ReadAllText(exe));
         Assert.False(File.Exists(exe + ".old"));
         Assert.False(File.Exists(fresh));
+    }
+
+    // ---------- отклик новой версии и откат ----------
+
+    private static string Whoami => Path.Combine(Environment.SystemDirectory, "whoami.exe");
+
+    [Fact]
+    public void Confirm_NewVersionSignals_KeepsIt()
+    {
+        string exe = Path.Combine(_dir, "BtQuickConnect.exe");
+        File.WriteAllText(exe, "new");
+        File.WriteAllText(exe + ".old", "old");
+        using var proc = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Whoami)
+            { UseShellExecute = false, RedirectStandardOutput = true })!;
+        var ready = new EventWaitHandle(true, EventResetMode.ManualReset);
+
+        Assert.True(Updater.ConfirmOrRollback(new UpdateHandoff(proc, ready, exe, new Version(9, 0, 0, 0))));
+        Assert.Equal("new", File.ReadAllText(exe));
+    }
+
+    [Fact]
+    public void Confirm_NewVersionExitsSilently_RollsBackAndStartsOld()
+    {
+        // новая версия упала, не отозвавшись; старая (здесь — whoami) возвращается и запускается
+        string exe = Path.Combine(_dir, "BtQuickConnect.exe");
+        File.WriteAllText(exe, "broken");
+        File.Copy(Whoami, exe + ".old");
+        byte[] oldBytes = File.ReadAllBytes(exe + ".old");
+        using var proc = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Whoami)
+            { UseShellExecute = false, RedirectStandardOutput = true })!;
+        proc.WaitForExit();
+        var ready = new EventWaitHandle(false, EventResetMode.ManualReset);
+
+        Assert.False(Updater.ConfirmOrRollback(new UpdateHandoff(proc, ready, exe, new Version(9, 0, 0, 0)),
+            TimeSpan.FromSeconds(5)));
+        Assert.Equal(oldBytes, File.ReadAllBytes(exe));
+        Assert.False(File.Exists(exe + ".old"));
+    }
+
+    [Fact]
+    public void Confirm_NewVersionHangs_IsKilledAndRolledBack()
+    {
+        string exe = Path.Combine(_dir, "BtQuickConnect.exe");
+        File.WriteAllText(exe, "hung");
+        File.WriteAllText(exe + ".old", "old");
+        using var proc = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+            Path.Combine(Environment.SystemDirectory, "ping.exe"), "-n 30 127.0.0.1")
+            { UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true })!;
+        var ready = new EventWaitHandle(false, EventResetMode.ManualReset);
+
+        Assert.False(Updater.ConfirmOrRollback(new UpdateHandoff(proc, ready, exe, new Version(9, 0, 0, 0)),
+            TimeSpan.FromSeconds(1)));
+        Assert.True(proc.HasExited);
+        Assert.Equal("old", File.ReadAllText(exe));
     }
 }

@@ -59,7 +59,7 @@ jobs:
           $ver = $tag.TrimStart("v", "V")
           # раздел CHANGELOG.md этой версии — в описание релиза
           $log = Get-Content CHANGELOG.md -Raw -Encoding utf8
-          $m = [regex]::Match($log, "(?ms)^## \[?$([regex]::Escape($ver))\]?[^\n]*\n(.*?)(?=^## |\z)")
+          $m = [regex]::Match($log, "(?ms)^## \[?$([regex]::Escape($ver))\]?(?=\s)[^\n]*\n(.*?)(?=^## |\z)")
           $notes = if ($m.Success) { $m.Groups[1].Value.Trim() } else { "BT Quick Connect $ver" }
           Set-Content notes.md $notes -Encoding utf8
           gh release view $tag 2>$null

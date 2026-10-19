@@ -43,7 +43,7 @@ internal sealed class HotkeyForm : Form
         };
         _hint = new Label
         {
-            Text = "Буквы и цифры — только с Ctrl / Alt / Shift / Win. Esc — отмена.",
+            Text = "Буквы и цифры — только с Ctrl / Alt / Win. Esc — отмена.",
             ForeColor = SystemColors.GrayText,
             TextAlign = ContentAlignment.MiddleCenter,
             Location = new Point(10, 100),
@@ -90,17 +90,17 @@ internal sealed class HotkeyForm : Form
             DialogResult = DialogResult.Cancel;
             return true;
         }
-        if (mods == 0 && !HotkeyBinding.AllowedWithoutModifiers(key))
-        {
-            ShowError($"«{new HotkeyBinding { Key = key }}» без модификатора мешала бы печатать. Добавьте Ctrl, Alt, Shift или Win.");
-            return true;
-        }
         Accept(new HotkeyBinding { Key = key, Modifiers = mods });
         return true;
     }
 
     private void Accept(HotkeyBinding b)
     {
+        if (HotkeyBinding.Validate(b) is { } error)
+        {
+            ShowError(error);   // окно ждёт следующего нажатия
+            return;
+        }
         Result = b;
         DialogResult = DialogResult.OK;
     }
