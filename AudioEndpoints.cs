@@ -10,6 +10,7 @@ namespace BtQuickConnect;
 internal static class AudioEndpoints
 {
     private const int DEVICE_STATE_ACTIVE = 1;
+    private const int DEVICE_STATE_DISABLED = 2;
     private const int DEVICE_STATE_UNPLUGGED = 8;
     private const int DEVICE_STATEMASK_ALL = 0xF;
     private const int eAll = 2;
@@ -17,18 +18,20 @@ internal static class AudioEndpoints
 
     /// <summary>
     /// Есть ли звук по состояниям аудиоустройств: ACTIVE — да; только UNPLUGGED — нет.
-    /// DISABLED (выключено в панели звука) и NOTPRESENT (старые записи) о подключении ничего не говорят:
-    /// если «живых» нет, null — тогда судим по радиосоединению.
+    /// NOTPRESENT (старые записи) не в счёт. Если что-то выключено в панели звука (DISABLED),
+    /// по оставшимся судить нельзя (выключили стерео, а Hands-Free не поднят) — null,
+    /// и о подключении судим по радиосоединению.
     /// </summary>
     internal static bool? Evaluate(IEnumerable<int> states)
     {
-        bool unplugged = false;
+        bool unplugged = false, disabled = false;
         foreach (int s in states)
         {
             if (s == DEVICE_STATE_ACTIVE) return true;
             if (s == DEVICE_STATE_UNPLUGGED) unplugged = true;
+            if (s == DEVICE_STATE_DISABLED) disabled = true;
         }
-        return unplugged ? false : null;
+        return unplugged && !disabled ? false : null;
     }
 
     /// <summary>null — у устройства нет живых аудиоустройств Windows; иначе — есть ли звук.</summary>

@@ -43,7 +43,8 @@ public class AudioStateTests
     [Theory]
     [InlineData(new[] { 1, 8, 8 }, true)]        // есть звук
     [InlineData(new[] { 8, 8, 8 }, false)]       // профили отключены
-    [InlineData(new[] { 2, 8 }, false)]          // одно выключено в панели звука, другое отключено
+    [InlineData(new[] { 2, 8 }, null)]           // стерео выключено в панели звука, Hands-Free не поднят — по радио
+    [InlineData(new[] { 4, 8 }, false)]          // старая запись + отключённый профиль
     [InlineData(new[] { 2, 1 }, true)]
     [InlineData(new[] { 2, 2 }, null)]           // всё выключено в панели звука — судим по радиосоединению
     [InlineData(new[] { 4, 4 }, null)]           // старые записи после повторного спаривания

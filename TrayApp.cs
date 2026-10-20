@@ -172,8 +172,9 @@ internal sealed class TrayApp : IDisposable
         }
         catch
         {
-            // опрос упал — всё равно пересчитать сроки (мигание, быстрый опрос) по последним данным
-            _ui.Post(_ => Apply(_devices), null);
+            // опрос упал — всё равно пересчитать сроки (мигание, быстрый опрос) по последним данным;
+            // Post при выходе может бросить, а исключение в таймере убило бы процесс (и откат обновления)
+            try { _ui.Post(_ => Apply(_devices), null); } catch { }
         }
         finally { Interlocked.Exchange(ref _polling, 0); }
     }
@@ -474,6 +475,7 @@ internal sealed class TrayApp : IDisposable
     private void Select(BtDevice? d)
     {
         Bluetooth.ForgetContainer(d?.Address);
+        _lastAudio = default;   // прежний замер звука относился к другому устройству
         _settings.Address = d?.Address;
         _settings.Name = d?.Name;
         TrySave();

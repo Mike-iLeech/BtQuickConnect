@@ -71,6 +71,8 @@ internal static class Bluetooth
 
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Guid> Containers =
         new(StringComparer.OrdinalIgnoreCase);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> LastForget =
+        new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Есть ли звук: активно ли хоть одно аудиоустройство Windows этого Bluetooth-устройства.
@@ -85,9 +87,18 @@ internal static class Bluetooth
             Containers[address] = container = found;
         }
         bool? audio = AudioEndpoints.AnyActive(container);
-        // звука нет при живом радиосоединении — возможно, устройство спарили заново и ContainerId
-        // сменился: следующий опрос найдёт его заново (во время отключения это ~3 лишних поиска)
-        if (audio != true && radioConnected) Containers.TryRemove(address, out _);
+        // живых аудиоустройств у контейнера нет, а радиосоединение есть — возможно, устройство спарили
+        // заново и ContainerId сменился (старые записи стали NOTPRESENT): найдём его заново,
+        // но не чаще раза в 10 с — у неаудиоустройств так будет всегда
+        if (audio == null && radioConnected)
+        {
+            var now = DateTime.UtcNow;
+            if (!LastForget.TryGetValue(address, out var last) || now - last > TimeSpan.FromSeconds(10))
+            {
+                LastForget[address] = now;
+                Containers.TryRemove(address, out _);
+            }
+        }
         return audio;
     }
 
