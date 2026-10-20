@@ -15,7 +15,7 @@ internal sealed class HotkeyForm : Form
     {
         _manager = manager;
 
-        Text = "Кнопка подключения";
+        Text = "Кнопка подключить/отключить";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
