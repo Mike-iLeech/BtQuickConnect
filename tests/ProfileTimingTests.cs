@@ -79,6 +79,18 @@ public class ProfileTimingTests
     }
 
     [Fact]
+    public void Settling_NotClearedWhileRadioStillUp()
+    {
+        // опрос передаёт настоящее состояние (радио ещё держится) — показанный оранжевый не снимает ожидание
+        var d = new DisconnectState();
+        int op = d.Begin(A, T0);
+        d.Finished(op, T0.AddSeconds(0.2), failed: false);
+        d.Observe(A, connected: true, T0.AddSeconds(1));
+        Assert.True(d.Settling(A, T0.AddSeconds(1)));
+        Assert.True(d.Active(A, T0.AddSeconds(1)));
+    }
+
+    [Fact]
     public void Settling_EndsWhenRadioDrops()
     {
         var d = new DisconnectState();

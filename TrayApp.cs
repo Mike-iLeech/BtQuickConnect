@@ -247,7 +247,9 @@ internal sealed class TrayApp : IDisposable
         if (_busy && DateTime.UtcNow > _connectDeadline)
         {
             StopBusy();
-            Balloon("Не удалось подключиться", $"{_settings.Name} не ответило. Проверьте, что устройство включено и рядом.",
+            // срок вышел, пока ждали стерео, а звук уже есть — это не провал подключения
+            if (_state != LedState.Green)
+                Balloon("Не удалось подключиться", $"{_settings.Name} не ответило. Проверьте, что устройство включено и рядом.",
                 ToolTipIcon.Warning);
         }
 
@@ -439,7 +441,10 @@ internal sealed class TrayApp : IDisposable
                 var item = new ToolStripMenuItem(d.Name.Length > 0 ? d.Name : d.Address)
                 {
                     Checked = d.Address.Equals(_settings.Address, StringComparison.OrdinalIgnoreCase),
-                    Image = (d.Connected ? _icons[LedState.Green] : _icons[LedState.Orange]).ToBitmap(),
+                    // выбранное устройство — тем же цветом, что огонёк в трее (в т.ч. «уже отключено»)
+                    Image = ((d.Address.Equals(_settings.Address, StringComparison.OrdinalIgnoreCase)
+                                ? _state == LedState.Green : d.Connected)
+                        ? _icons[LedState.Green] : _icons[LedState.Orange]).ToBitmap(),
                 };
                 var dev = d;
                 item.Click += (_, _) => Select(dev);

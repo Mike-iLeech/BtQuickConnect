@@ -2,15 +2,15 @@ using System.Runtime.InteropServices;
 
 namespace BtQuickConnect;
 
+/// <summary>Звук устройства: Connected — есть ли (null — не понять по аудиоустройствам);
+/// AllUp — не осталось отключённых профилей (стерео и гарнитура подняты).</summary>
+internal sealed record AudioState(bool? Connected, bool AllUp);
+
 /// <summary>
 /// Аудиоустройства Windows (наушники, гарнитура) одного Bluetooth-устройства — по ContainerId.
 /// Их состояние меняется сразу, как профиль подключился или отключился, а радиосоединение (ACL),
 /// которое видит BluetoothFindFirstDevice, Windows держит после отключения звука ещё ~3 с.
 /// </summary>
-/// <summary>Звук устройства: Connected — есть ли (null — не понять по аудиоустройствам);
-/// AllUp — не осталось отключённых профилей (стерео и гарнитура подняты).</summary>
-internal sealed record AudioState(bool? Connected, bool AllUp);
-
 internal static class AudioEndpoints
 {
     private const int DEVICE_STATE_ACTIVE = 1;
