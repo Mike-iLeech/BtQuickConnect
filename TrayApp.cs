@@ -22,6 +22,7 @@ internal sealed class TrayApp : IDisposable
     private bool _busy;               // идёт подключение/отключение
     private DateTime _connectDeadline;
     private readonly DisconnectState _disconnect = new();
+    private bool _hotkeyActive;   // кнопка назначена и зарегистрирована
     private bool Disconnecting => _disconnect.Active(_settings.Address, DateTime.Now);
     private bool _blinkOn;
 
@@ -66,7 +67,8 @@ internal sealed class TrayApp : IDisposable
 
         _hotkeys = new HotkeyManager(_ui);
         _hotkeys.Pressed += ToggleSelected;
-        if (!_hotkeys.Apply(_settings.Hotkey, out string hkErr))
+        _hotkeyActive = _hotkeys.Apply(_settings.Hotkey, out string hkErr) && _settings.Hotkey != null;
+        if (_settings.Hotkey != null && !_hotkeyActive)
             Balloon("Кнопка подключить/отключить не работает", hkErr + " Назначьте другую через меню.", ToolTipIcon.Warning);
         else if (rolledBack != null)
             Balloon("Обновление отменено",
@@ -198,8 +200,8 @@ internal sealed class TrayApp : IDisposable
         if (Disconnecting) return $"{name}: отключение…";
         return _state switch
         {
-            LedState.Green => $"{name}: подключено (двойной клик" + (_settings.Hotkey != null ? " или кнопка" : "") + " — отключить)",
-            LedState.Orange => $"{name}: не подключено (двойной клик" + (_settings.Hotkey != null ? " или кнопка" : "") + " — подключить)",
+            LedState.Green => $"{name}: подключено (двойной клик" + (_hotkeyActive ? " или кнопка" : "") + " — отключить)",
+            LedState.Orange => $"{name}: не подключено (двойной клик" + (_hotkeyActive ? " или кнопка" : "") + " — подключить)",
             _ => $"{name}: не спарено с компьютером",
         };
     }
@@ -272,7 +274,7 @@ internal sealed class TrayApp : IDisposable
         if (_busy || Disconnecting || Selected is not { Connected: true } sel) return;
         string addr = sel.Address;
         // пока Windows рвёт связь, огонёк ещё зелёный — повторное нажатие не должно снова слать отключение
-        _disconnect.Begin(addr, DateTime.Now);
+        int op = _disconnect.Begin(addr, DateTime.Now);
         _tray.Text = Truncate(TooltipText());
         Task.Run(() =>
         {
@@ -282,7 +284,7 @@ internal sealed class TrayApp : IDisposable
             catch (Exception e) { r = KsResult.Failed; err = e.Message; }   // ответ в UI должен прийти всегда
             _ui.Post(_ =>
             {
-                _disconnect.Finished(DateTime.Now, failed: r != KsResult.Ok);
+                _disconnect.Finished(op, DateTime.Now, failed: r != KsResult.Ok);
                 _tray.Text = Truncate(TooltipText());
                 if (r != KsResult.Ok)
                 {
@@ -453,7 +455,8 @@ internal sealed class TrayApp : IDisposable
 
                 if (result != DialogResult.OK)
                 {
-                    if (!_hotkeys.Apply(_settings.Hotkey, out string restoreErr))   // вернуть прежнее назначение
+                    _hotkeyActive = _hotkeys.Apply(_settings.Hotkey, out string restoreErr) && _settings.Hotkey != null;
+                    if (_settings.Hotkey != null && !_hotkeyActive)   // вернуть прежнее назначение не удалось
                         Balloon("Кнопка подключить/отключить не работает", restoreErr, ToolTipIcon.Warning);
                     return;
                 }
@@ -461,6 +464,7 @@ internal sealed class TrayApp : IDisposable
                 if (_hotkeys.Apply(chosen, out error))
                 {
                     _settings.Hotkey = chosen;
+                    _hotkeyActive = chosen != null;
                     TrySave();
                     if (chosen != null)
                         Balloon("Кнопка назначена", $"{chosen} — подключить или отключить {_settings.Name ?? "выбранное устройство"}.", ToolTipIcon.Info);

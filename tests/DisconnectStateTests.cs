@@ -25,8 +25,8 @@ public class DisconnectStateTests
     public void Finished_ThenPollSeesDisconnected_Clears()
     {
         var d = new DisconnectState();
-        d.Begin(A, T0);
-        d.Finished(S(2), failed: false);
+        int op = d.Begin(A, T0);
+        d.Finished(op, S(2), failed: false);
         Assert.True(d.Active(A, S(2)));            // огонёк ещё может быть зелёным
         d.Observe(A, connected: false, S(3));
         Assert.False(d.Active(A, S(3)));
@@ -36,8 +36,8 @@ public class DisconnectStateTests
     public void Finished_StillConnected_ClearsAfterSettleLimit()
     {
         var d = new DisconnectState();
-        d.Begin(A, T0);
-        d.Finished(S(1), failed: false);
+        int op = d.Begin(A, T0);
+        d.Finished(op, S(1), failed: false);
         d.Observe(A, connected: true, S(5));
         Assert.True(d.Active(A, S(5)));
         Assert.False(d.Active(A, S(1) + DisconnectState.SettleLimit + TimeSpan.FromMilliseconds(1)));
@@ -47,8 +47,8 @@ public class DisconnectStateTests
     public void Failed_ClearsAtOnce()
     {
         var d = new DisconnectState();
-        d.Begin(A, T0);
-        d.Finished(S(1), failed: true);
+        int op = d.Begin(A, T0);
+        d.Finished(op, S(1), failed: true);
         Assert.False(d.Active(A, S(1)));
     }
 
@@ -91,5 +91,47 @@ public class DisconnectStateTests
         var d = new DisconnectState();
         d.Begin(A, T0);
         Assert.True(d.Active(A.ToLowerInvariant(), S(1)));
+    }
+
+    [Fact]
+    public void LateAnswerForOtherDevice_DoesNotTouchCurrent()
+    {
+        // отключали A, сразу выбрали B и отключаем его; ответ по A приходит позже
+        var d = new DisconnectState();
+        int opA = d.Begin(A, T0);
+        d.Begin(B, S(1));
+        d.Finished(opA, S(2), failed: true);          // ошибка по A не должна снять ожидание B
+        Assert.True(d.InFlight(S(2)));
+        d.Observe(B, connected: false, S(3));          // A2DP у B уже порван, Hands-Free ещё рвётся
+        Assert.True(d.Active(B, S(3)));
+    }
+
+    [Fact]
+    public void StaleAnswerAfterHang_IgnoredForReconnectedDevice()
+    {
+        // Disconnect завис дольше лимита, устройство подключили заново, старый ответ пришёл позже
+        var d = new DisconnectState();
+        int op1 = d.Begin(A, T0);
+        var later = T0 + DisconnectState.InFlightLimit + TimeSpan.FromSeconds(1);
+        d.Observe(A, connected: false, later);
+        Assert.False(d.Active(A, later));
+        int op2 = d.Begin(A, later.AddSeconds(5));     // снова отключаем
+        d.Finished(op1, later.AddSeconds(6), failed: false);
+        Assert.True(d.InFlight(later.AddSeconds(6)));  // старый ответ не оборвал новое отключение
+        d.Finished(op2, later.AddSeconds(7), failed: true);
+        Assert.False(d.Active(A, later.AddSeconds(7)));
+    }
+
+    [Fact]
+    public void AnswerAfterLimit_DoesNotBlockReconnectedDevice()
+    {
+        // завис дольше лимита → опрос увидел отключение → пользователь подключил заново → старый ответ пришёл
+        var d = new DisconnectState();
+        int op = d.Begin(A, T0);
+        var later = T0 + DisconnectState.InFlightLimit + TimeSpan.FromSeconds(1);
+        d.Observe(A, connected: false, later);
+        d.Observe(A, connected: true, later.AddSeconds(4));
+        d.Finished(op, later.AddSeconds(5), failed: false);
+        Assert.False(d.Active(A, later.AddSeconds(5)));
     }
 }

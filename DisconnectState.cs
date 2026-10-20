@@ -12,21 +12,32 @@ internal sealed class DisconnectState
     public static readonly TimeSpan SettleLimit = TimeSpan.FromSeconds(10);     // огонёк ещё зелёный после него
 
     private string? _address;
+    private int _generation;
     private bool _inFlight;
     private DateTime _inFlightUntil = DateTime.MinValue;
     private DateTime _settleUntil = DateTime.MinValue;
 
-    public void Begin(string address, DateTime now)
+    /// <summary>Возвращает номер операции: ответ Finished с чужим номером (прошлое отключение) игнорируется.</summary>
+    public int Begin(string address, DateTime now)
     {
         _address = address;
         _inFlight = true;
         _inFlightUntil = now + InFlightLimit;
         _settleUntil = now + InFlightLimit + SettleLimit;
+        return ++_generation;
     }
 
     /// <summary>Disconnect вернулся (успешно или нет). failed — ждать погасания огонька незачем.</summary>
-    public void Finished(DateTime now, bool failed)
+    public void Finished(int operation, DateTime now, bool failed)
     {
+        if (operation != _generation) return;   // ответ давно начатого отключения — у текущего свои сроки
+        if (!InFlight(now))
+        {
+            // ответ пришёл позже лимита: ожидание уже сняли, устройство могли подключить заново —
+            // не вешаем «отключение…» на подключённое устройство
+            _inFlight = false;
+            return;
+        }
         _inFlight = false;
         _settleUntil = failed ? DateTime.MinValue : now + SettleLimit;
     }
