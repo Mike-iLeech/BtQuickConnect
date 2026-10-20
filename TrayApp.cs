@@ -42,7 +42,7 @@ internal sealed class TrayApp : IDisposable
     private ReleaseInfo? _pendingUpdate;
     private bool _updating;
     private readonly Version? _rolledBack;
-    private string? _lastAutoError;   // фоновая ошибка показывается один раз, а не каждые 6 часов
+    private string? _lastAutoError;   // фоновая ошибка показывается один раз, а не при каждой проверке
 
     /// <summary>Запущенная новая версия; Program дождётся её отклика после выхода из цикла сообщений.</summary>
     public UpdateHandoff? Handoff { get; private set; }
@@ -95,7 +95,7 @@ internal sealed class TrayApp : IDisposable
                 notes?.PageUrl is { Length: > 0 } url ? url : $"https://github.com/{Updater.Repo}/releases/latest");
         }
 
-        // первая проверка через 30 секунд после старта, дальше раз в час
+        // первая проверка через 30 секунд после старта, дальше — с интервалом из меню
         _updateTimer.Tick += (_, _) =>
         {
             if (CheckInterval(_settings.UpdateCheckHours) is not { } every) { _updateTimer.Stop(); return; }
@@ -182,6 +182,9 @@ internal sealed class TrayApp : IDisposable
                             || CheckInterval(_settings.UpdateCheckHours) == null))
             {
                 try { File.Delete(file); } catch { /* удалит Cleanup при следующем запуске */ }
+                // обещали перезапуск — скажем, что его не будет
+                Balloon("Обновление отложено", $"Версию {r.Version.ToString(3)} можно установить из меню по правой кнопке.",
+                    ToolTipIcon.Info, r.PageUrl);
                 return;
             }
             Updater.SaveNotes(r);
@@ -542,6 +545,7 @@ internal sealed class TrayApp : IDisposable
             var item = new ToolStripMenuItem(IntervalName(h)) { Checked = h == _settings.UpdateCheckHours };
             item.Click += (_, _) =>
             {
+                if (_settings.UpdateCheckHours == h) return;   // тот же интервал — расписание не трогаем
                 _settings.UpdateCheckHours = h;
                 TrySave();
                 ScheduleUpdateChecks();
