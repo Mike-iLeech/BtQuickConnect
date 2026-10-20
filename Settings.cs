@@ -9,6 +9,8 @@ internal sealed class Settings
     public string? Name { get; set; }
     public HotkeyBinding? Hotkey { get; set; }
     public bool AutoUpdate { get; set; } = true;
+    /// <summary>Как часто проверять обновления, в часах; 0 — не проверять (вручную из меню можно).</summary>
+    public int UpdateCheckHours { get; set; } = 1;
     /// <summary>Версия, которая однажды не запустилась: автоматически её больше не ставим.</summary>
     public string? SkippedUpdate { get; set; }
 

@@ -33,12 +33,16 @@ internal sealed class TrayApp : IDisposable
     private bool OtherDisconnecting => !Disconnecting && _disconnect.InFlight(DateTime.UtcNow);
     private bool _blinkOn;
 
-    private static readonly TimeSpan UpdateInterval = TimeSpan.FromHours(6);
+    /// <summary>Варианты интервала в меню, в часах; 0 — не проверять.</summary>
+    internal static readonly int[] UpdateCheckChoices = { 1, 3, 6, 12, 24, 0 };
+    private static readonly TimeSpan FirstCheckDelay = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan UpdateNoticeDelay = TimeSpan.FromSeconds(8);   // успеть прочитать «найдено обновление»
+    private string? _balloonUrl;   // куда ведёт щелчок по текущему уведомлению
     private readonly System.Windows.Forms.Timer _updateTimer = new() { Interval = 30_000 };
     private ReleaseInfo? _pendingUpdate;
     private bool _updating;
     private readonly Version? _rolledBack;
-    private string? _lastAutoError;   // фоновая ошибка показывается один раз, а не каждые 6 часов
+    private string? _lastAutoError;   // фоновая ошибка показывается один раз, а не при каждой проверке
 
     /// <summary>Запущенная новая версия; Program дождётся её отклика после выхода из цикла сообщений.</summary>
     public UpdateHandoff? Handoff { get; private set; }
@@ -60,6 +64,7 @@ internal sealed class TrayApp : IDisposable
         _tray.Icon = _icons[LedState.Red];
         _tray.Text = "BT Quick Connect";
         _tray.Visible = true;
+        _tray.BalloonTipClicked += (_, _) => OpenUrl(_balloonUrl);
 
         _blink.Tick += (_, _) => OnBlink();
         _poll = new System.Threading.Timer(_ => Poll(), null, 0, 2000);
@@ -81,19 +86,47 @@ internal sealed class TrayApp : IDisposable
             Balloon("Обновление отменено",
                 $"Версия {_rolledBack?.ToString(3) ?? rolledBack} не запустилась — возвращена {Updater.Current.ToString(3)}.",
                 ToolTipIcon.Warning);
-        else if (updatedFrom != null)
-            Balloon("BT Quick Connect обновлён", $"Установлена версия {Updater.Current.ToString(3)}.", ToolTipIcon.Info);
+        // заметки забираем всегда: после отката или ручного запуска они лежали бы до следующего обновления
+        var notes = Updater.TakeNotes(Updater.Current);
+        if (updatedFrom != null && (_settings.Hotkey == null || _hotkeyActive) && rolledBack == null)
+        {
+            string what = notes is { } n && Updater.BalloonText(n.Notes) is { Length: > 0 } t ? t : "Щёлкните, чтобы посмотреть, что нового.";
+            Balloon($"BT Quick Connect обновлён до {Updater.Current.ToString(3)}", what, ToolTipIcon.Info,
+                notes?.PageUrl is { Length: > 0 } url ? url : $"https://github.com/{Updater.Repo}/releases/latest");
+        }
 
-        // первая проверка через 30 секунд после старта, дальше раз в 6 часов
+        // первая проверка через 30 секунд после старта, дальше — с интервалом из меню
         _updateTimer.Tick += (_, _) =>
         {
-            _updateTimer.Interval = (int)UpdateInterval.TotalMilliseconds;
+            if (CheckInterval(_settings.UpdateCheckHours) is not { } every) { _updateTimer.Stop(); return; }
+            _updateTimer.Interval = (int)every.TotalMilliseconds;
             CheckUpdates(manual: false);
         };
-        if (Updater.ExePath != null) _updateTimer.Start();
+        ScheduleUpdateChecks();
     }
 
     // ---------- обновление ----------
+
+    /// <summary>Интервал проверки: null — не проверять; странные значения из файла — в пределах 1 ч … 7 сут.</summary>
+    internal static TimeSpan? CheckInterval(int hours) =>
+        hours <= 0 ? null : TimeSpan.FromHours(Math.Clamp(hours, 1, 168));
+
+    internal static string IntervalName(int hours) => hours switch
+    {
+        <= 0 => "Никогда",
+        1 => "Раз в час",
+        24 => "Раз в сутки",
+        _ => $"Раз в {hours} ч",
+    };
+
+    /// <summary>Перезапускает расписание: первая проверка через 30 с, дальше — по выбранному интервалу.</summary>
+    private void ScheduleUpdateChecks()
+    {
+        _updateTimer.Stop();
+        if (Updater.ExePath == null || CheckInterval(_settings.UpdateCheckHours) == null) return;
+        _updateTimer.Interval = (int)FirstCheckDelay.TotalMilliseconds;
+        _updateTimer.Start();
+    }
 
     private async void CheckUpdates(bool manual)
     {
@@ -126,7 +159,7 @@ internal sealed class TrayApp : IDisposable
         else if (_lastAutoError != "offer:" + r.Tag)
         {
             _lastAutoError = "offer:" + r.Tag;
-            Balloon("Доступно обновление", $"Версия {r.Version.ToString(3)}: ПКМ по значку → «Установить обновление».", ToolTipIcon.Info);
+            Balloon("Доступно обновление", $"Версия {r.Version.ToString(3)}: ПКМ по значку → «Установить обновление».", ToolTipIcon.Info, r.PageUrl);
         }
     }
 
@@ -139,7 +172,22 @@ internal sealed class TrayApp : IDisposable
         _updating = true;
         try
         {
+            Balloon("Найдено обновление BT Quick Connect",
+                $"Версия {r.Version.ToString(3)}. Устанавливаю — программа перезапустится через несколько секунд.",
+                ToolTipIcon.Info, r.PageUrl);
             string file = await Updater.DownloadAsync(r, exe);
+            await Task.Delay(UpdateNoticeDelay);   // иначе уведомление исчезнет вместе со значком почти сразу
+            // пока ждали: начали подключать, открыли запись кнопки, выключили автообновление или проверки
+            if (!manual && (_busy || Disconnecting || _hotkeyForm != null || !_settings.AutoUpdate
+                            || CheckInterval(_settings.UpdateCheckHours) == null))
+            {
+                try { File.Delete(file); } catch { /* удалит Cleanup при следующем запуске */ }
+                // обещали перезапуск — скажем, что его не будет
+                Balloon("Обновление отложено", $"Версию {r.Version.ToString(3)} можно установить из меню по правой кнопке.",
+                    ToolTipIcon.Info, r.PageUrl);
+                return;
+            }
+            Updater.SaveNotes(r);
             Handoff = Updater.InstallAndStart(file, exe, r.Version);
             Exit();
         }
@@ -397,8 +445,20 @@ internal sealed class TrayApp : IDisposable
         _tray.Icon = _blinkOn ? _icons[LedState.Orange] : _dimIcon;
     }
 
-    private void Balloon(string title, string text, ToolTipIcon icon) =>
+    private void Balloon(string title, string text, ToolTipIcon icon, string? url = null)
+    {
+        _balloonUrl = url;
         _tray.ShowBalloonTip(5000, title, text, icon);
+    }
+
+    private static void OpenUrl(string? url)
+    {
+        // только страницы GitHub: адрес приходит из ответа API и из файла заметок
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var u) || u.Scheme != Uri.UriSchemeHttps
+            || !u.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase)) return;
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); }
+        catch { /* нет браузера по умолчанию */ }
+    }
 
     private void TrySave()
     {
@@ -478,7 +538,23 @@ internal sealed class TrayApp : IDisposable
         };
         _menu.Items.Add(auto);
 
-        var autoUpd = new ToolStripMenuItem("Обновлять автоматически") { Checked = _settings.AutoUpdate };
+        var checkEvery = new ToolStripMenuItem($"Проверять обновления: {IntervalName(_settings.UpdateCheckHours).ToLowerInvariant()}");
+        foreach (int hours in UpdateCheckChoices)
+        {
+            int h = hours;
+            var item = new ToolStripMenuItem(IntervalName(h)) { Checked = h == _settings.UpdateCheckHours };
+            item.Click += (_, _) =>
+            {
+                if (_settings.UpdateCheckHours == h) return;   // тот же интервал — расписание не трогаем
+                _settings.UpdateCheckHours = h;
+                TrySave();
+                ScheduleUpdateChecks();
+            };
+            checkEvery.DropDownItems.Add(item);
+        }
+        _menu.Items.Add(checkEvery);
+
+        var autoUpd = new ToolStripMenuItem("Устанавливать обновления сами") { Checked = _settings.AutoUpdate };
         autoUpd.Click += (_, _) => { _settings.AutoUpdate = !_settings.AutoUpdate; TrySave(); };
         _menu.Items.Add(autoUpd);
         if (_pendingUpdate is { } upd && Updater.IsNewer(upd))
