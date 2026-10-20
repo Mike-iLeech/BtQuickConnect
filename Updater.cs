@@ -6,7 +6,8 @@ using System.Text.Json;
 
 namespace BtQuickConnect;
 
-internal sealed record ReleaseInfo(Version Version, string Tag, string PageUrl, string AssetUrl, long AssetSize, string? Sha256);
+internal sealed record ReleaseInfo(Version Version, string Tag, string PageUrl, string AssetUrl, long AssetSize, string? Sha256,
+    string Notes = "");
 
 internal sealed class UpdateException(string message, Exception? inner = null) : Exception(message, inner);
 
@@ -88,7 +89,8 @@ internal static class Updater
             string? sha = digest != null && digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)
                 ? digest[7..].ToLowerInvariant() : null;
             string page = root.TryGetProperty("html_url", out var h) ? h.GetString() ?? "" : "";
-            return new ReleaseInfo(version, tag, page, url, size, sha);
+            string notes = root.TryGetProperty("body", out var b) && b.ValueKind == JsonValueKind.String ? b.GetString() ?? "" : "";
+            return new ReleaseInfo(version, tag, page, url, size, sha, notes);
         }
         return null;
     }
@@ -259,6 +261,48 @@ internal static class Updater
             TryDelete(newFile);
             throw e as UpdateException ?? new UpdateException("Новая версия не запустилась: " + e.Message, e);
         }
+    }
+
+    // ---------- что нового: старая версия оставляет заметки, новая показывает их после перезапуска ----------
+
+    internal static string NotesFile { get; set; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "BtQuickConnect", "update-notes.txt");
+
+    /// <summary>Перед перезапуском: версия, страница релиза и описание — для уведомления новой версии.</summary>
+    public static void SaveNotes(ReleaseInfo r)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(NotesFile)!);
+            File.WriteAllText(NotesFile, $"{r.Version}\n{r.PageUrl}\n{r.Notes}");
+        }
+        catch { /* без заметок уведомление просто будет короче */ }
+    }
+
+    /// <summary>Забирает заметки (файл удаляется). null — заметок нет или они к другой версии.</summary>
+    public static (string Notes, string PageUrl)? TakeNotes(Version current)
+    {
+        try
+        {
+            if (!File.Exists(NotesFile)) return null;
+            string[] parts = File.ReadAllText(NotesFile).Split('\n', 3);
+            File.Delete(NotesFile);
+            if (parts.Length < 2 || ParseVersion(parts[0]) != current) return null;
+            return (parts.Length > 2 ? parts[2] : "", parts[1].Trim());
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Описание релиза (markdown из CHANGELOG) → короткий текст для уведомления Windows.</summary>
+    public static string BalloonText(string notes, int max = 200)
+    {
+        var lines = notes.Replace("\r", "").Split('\n')
+            .Select(l => l.Trim())
+            .Where(l => l.Length > 0 && !l.StartsWith('#'))
+            .Select(l => l.StartsWith("- ") || l.StartsWith("* ") ? "• " + l[2..].Trim() : l)
+            .Select(l => l.Replace("**", "").Replace("`", ""));
+        string text = string.Join("\n", lines);
+        return text.Length <= max ? text : text[..(max - 1)].TrimEnd() + "…";
     }
 
     /// <summary>Новая версия отзывается старой: «я запустилась», после этого старая выходит окончательно.</summary>

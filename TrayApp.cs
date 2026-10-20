@@ -33,7 +33,9 @@ internal sealed class TrayApp : IDisposable
     private bool OtherDisconnecting => !Disconnecting && _disconnect.InFlight(DateTime.UtcNow);
     private bool _blinkOn;
 
-    private static readonly TimeSpan UpdateInterval = TimeSpan.FromHours(6);
+    private static readonly TimeSpan UpdateInterval = TimeSpan.FromHours(1);
+    private static readonly TimeSpan UpdateNoticeDelay = TimeSpan.FromSeconds(8);   // успеть прочитать «найдено обновление»
+    private string? _balloonUrl;   // куда ведёт щелчок по текущему уведомлению
     private readonly System.Windows.Forms.Timer _updateTimer = new() { Interval = 30_000 };
     private ReleaseInfo? _pendingUpdate;
     private bool _updating;
@@ -60,6 +62,7 @@ internal sealed class TrayApp : IDisposable
         _tray.Icon = _icons[LedState.Red];
         _tray.Text = "BT Quick Connect";
         _tray.Visible = true;
+        _tray.BalloonTipClicked += (_, _) => OpenUrl(_balloonUrl);
 
         _blink.Tick += (_, _) => OnBlink();
         _poll = new System.Threading.Timer(_ => Poll(), null, 0, 2000);
@@ -81,10 +84,16 @@ internal sealed class TrayApp : IDisposable
             Balloon("Обновление отменено",
                 $"Версия {_rolledBack?.ToString(3) ?? rolledBack} не запустилась — возвращена {Updater.Current.ToString(3)}.",
                 ToolTipIcon.Warning);
-        else if (updatedFrom != null)
-            Balloon("BT Quick Connect обновлён", $"Установлена версия {Updater.Current.ToString(3)}.", ToolTipIcon.Info);
+        // заметки забираем всегда: после отката или ручного запуска они лежали бы до следующего обновления
+        var notes = Updater.TakeNotes(Updater.Current);
+        if (updatedFrom != null && (_settings.Hotkey == null || _hotkeyActive) && rolledBack == null)
+        {
+            string what = notes is { } n && Updater.BalloonText(n.Notes) is { Length: > 0 } t ? t : "Щёлкните, чтобы посмотреть, что нового.";
+            Balloon($"BT Quick Connect обновлён до {Updater.Current.ToString(3)}", what, ToolTipIcon.Info,
+                notes?.PageUrl is { Length: > 0 } url ? url : $"https://github.com/{Updater.Repo}/releases/latest");
+        }
 
-        // первая проверка через 30 секунд после старта, дальше раз в 6 часов
+        // первая проверка через 30 секунд после старта, дальше раз в час
         _updateTimer.Tick += (_, _) =>
         {
             _updateTimer.Interval = (int)UpdateInterval.TotalMilliseconds;
@@ -126,7 +135,7 @@ internal sealed class TrayApp : IDisposable
         else if (_lastAutoError != "offer:" + r.Tag)
         {
             _lastAutoError = "offer:" + r.Tag;
-            Balloon("Доступно обновление", $"Версия {r.Version.ToString(3)}: ПКМ по значку → «Установить обновление».", ToolTipIcon.Info);
+            Balloon("Доступно обновление", $"Версия {r.Version.ToString(3)}: ПКМ по значку → «Установить обновление».", ToolTipIcon.Info, r.PageUrl);
         }
     }
 
@@ -139,7 +148,13 @@ internal sealed class TrayApp : IDisposable
         _updating = true;
         try
         {
+            Balloon("Найдено обновление BT Quick Connect",
+                $"Версия {r.Version.ToString(3)}. Устанавливаю — программа перезапустится через несколько секунд.",
+                ToolTipIcon.Info, r.PageUrl);
             string file = await Updater.DownloadAsync(r, exe);
+            await Task.Delay(UpdateNoticeDelay);   // иначе уведомление исчезнет вместе со значком почти сразу
+            if (!manual && (_busy || Disconnecting || _hotkeyForm != null)) return;   // пока ждали, начали подключать
+            Updater.SaveNotes(r);
             Handoff = Updater.InstallAndStart(file, exe, r.Version);
             Exit();
         }
@@ -397,8 +412,18 @@ internal sealed class TrayApp : IDisposable
         _tray.Icon = _blinkOn ? _icons[LedState.Orange] : _dimIcon;
     }
 
-    private void Balloon(string title, string text, ToolTipIcon icon) =>
+    private void Balloon(string title, string text, ToolTipIcon icon, string? url = null)
+    {
+        _balloonUrl = url;
         _tray.ShowBalloonTip(5000, title, text, icon);
+    }
+
+    private static void OpenUrl(string? url)
+    {
+        if (string.IsNullOrEmpty(url) || !url.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase)) return;
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); }
+        catch { /* нет браузера по умолчанию */ }
+    }
 
     private void TrySave()
     {
