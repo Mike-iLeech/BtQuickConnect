@@ -19,11 +19,16 @@ internal sealed class TrayApp : IDisposable
     private List<BtDevice>? _devices = new();
     private LedState _state = LedState.Red;
     private int _polling;
+    private int _pollPeriod = 2000;
+    private (string? Address, bool? Audio) _lastAudio;   // последний замер звука — для списка в меню
     private bool _busy;               // идёт подключение/отключение
     private DateTime _connectDeadline;
     private readonly DisconnectState _disconnect = new();
     private bool _hotkeyActive;   // кнопка назначена и зарегистрирована
-    private bool Disconnecting => _disconnect.Active(_settings.Address, DateTime.Now);
+    // время — UtcNow: перевод часов (зимнее время) не растягивает и не обрывает ожидания
+    private bool Disconnecting => _disconnect.Active(_settings.Address, DateTime.UtcNow);
+    /// <summary>Идёт отключение другого устройства: отключать выбранное пока нельзя, иначе состояние первого потеряется.</summary>
+    private bool OtherDisconnecting => !Disconnecting && _disconnect.InFlight(DateTime.UtcNow);
     private bool _blinkOn;
 
     private static readonly TimeSpan UpdateInterval = TimeSpan.FromHours(6);
@@ -155,10 +160,37 @@ internal sealed class TrayApp : IDisposable
         try
         {
             var devices = Bluetooth.GetPairedDevices();
-            _ui.Post(_ => Apply(devices), null);
+            string? addr = _settings.Address;
+            bool? audio = null;
+            if (addr != null && devices != null)
+            {
+                try { audio = Bluetooth.AudioConnected(addr); }
+                catch { /* аудиоподсистема недоступна — судим по радиосоединению */ }
+            }
+            _ui.Post(_ => { _lastAudio = (addr, audio); Apply(WithAudioState(devices, addr, audio)); }, null);
         }
         catch { /* следующий тик попробует снова */ }
         finally { Interlocked.Exchange(ref _polling, 0); }
+    }
+
+    /// <summary>
+    /// Для выбранного аудиоустройства «подключено» = есть звук (активно аудиоустройство Windows),
+    /// а не радиосоединение: оно держится ~3 с после отключения и опаздывает при подключении.
+    /// </summary>
+    internal static List<BtDevice>? WithAudioState(List<BtDevice>? devices, string? address, bool? audio)
+    {
+        if (devices == null || address == null || audio == null) return devices;
+        return devices.Select(d => d.Address.Equals(address, StringComparison.OrdinalIgnoreCase)
+            ? d with { Connected = audio.Value } : d).ToList();
+    }
+
+    /// <summary>Пока идёт подключение или отключение, опрашиваем часто — огонёк меняется сразу.</summary>
+    private void SetFastPoll(bool fast)
+    {
+        int period = fast ? 250 : 2000;
+        if (period == _pollPeriod) return;
+        _pollPeriod = period;
+        _poll.Change(fast ? 0 : period, period);
     }
 
     private BtDevice? Selected =>
@@ -179,8 +211,8 @@ internal sealed class TrayApp : IDisposable
         _state = sel == null ? LedState.Red : sel.Connected ? LedState.Green : LedState.Orange;
 
         if (_busy && _state == LedState.Green) StopBusy();
-        _disconnect.Observe(_settings.Address, sel?.Connected == true, DateTime.Now);
-        if (_busy && DateTime.Now > _connectDeadline)
+        _disconnect.Observe(_settings.Address, sel?.Connected == true, DateTime.UtcNow);
+        if (_busy && DateTime.UtcNow > _connectDeadline)
         {
             StopBusy();
             Balloon("Не удалось подключиться", $"{_settings.Name} не ответило. Проверьте, что устройство включено и рядом.",
@@ -189,6 +221,7 @@ internal sealed class TrayApp : IDisposable
 
         if (!_busy) _tray.Icon = _icons[_state];
         _tray.Text = Truncate(TooltipText());
+        SetFastPoll(_busy || Disconnecting || _disconnect.InFlight(DateTime.UtcNow));
     }
 
     private string TooltipText()
@@ -198,6 +231,7 @@ internal sealed class TrayApp : IDisposable
         string name = _settings.Name ?? _settings.Address;
         if (_busy) return $"{name}: подключение…";
         if (Disconnecting) return $"{name}: отключение…";
+        if (OtherDisconnecting && _state == LedState.Green) return $"{name}: подключено (ждём, пока отключится прежнее устройство)";
         return _state switch
         {
             LedState.Green => $"{name}: подключено (двойной клик" + (_hotkeyActive ? " или кнопка" : "") + " — отключить)",
@@ -220,7 +254,8 @@ internal sealed class TrayApp : IDisposable
     /// <summary>Двойной клик и назначенная кнопка переключают: подключают отключённое устройство и отключают подключённое.</summary>
     private void ToggleSelected()
     {
-        switch (DecideToggle(Selected?.Connected == true, _busy, Disconnecting))
+        bool connected = Selected?.Connected == true;
+        switch (DecideToggle(connected, _busy, Disconnecting || (connected && OtherDisconnecting)))
         {
             case ToggleAction.Connect: ConnectSelected(); break;
             case ToggleAction.Disconnect: DisconnectSelected(); break;
@@ -271,10 +306,11 @@ internal sealed class TrayApp : IDisposable
 
     private void DisconnectSelected()
     {
-        if (_busy || Disconnecting || Selected is not { Connected: true } sel) return;
+        if (_busy || Disconnecting || OtherDisconnecting || Selected is not { Connected: true } sel) return;
         string addr = sel.Address;
         // пока Windows рвёт связь, огонёк ещё зелёный — повторное нажатие не должно снова слать отключение
-        int op = _disconnect.Begin(addr, DateTime.Now);
+        int op = _disconnect.Begin(addr, DateTime.UtcNow);
+        SetFastPoll(true);
         _tray.Text = Truncate(TooltipText());
         Task.Run(() =>
         {
@@ -284,7 +320,7 @@ internal sealed class TrayApp : IDisposable
             catch (Exception e) { r = KsResult.Failed; err = e.Message; }   // ответ в UI должен прийти всегда
             _ui.Post(_ =>
             {
-                _disconnect.Finished(op, DateTime.Now, failed: r != KsResult.Ok);
+                _disconnect.Finished(op, DateTime.UtcNow, failed: r != KsResult.Ok);
                 _tray.Text = Truncate(TooltipText());
                 if (r != KsResult.Ok)
                 {
@@ -297,8 +333,9 @@ internal sealed class TrayApp : IDisposable
 
     private void StartBusy(TimeSpan timeout)
     {
+        SetFastPoll(true);
         _busy = true;
-        _connectDeadline = DateTime.Now + timeout;
+        _connectDeadline = DateTime.UtcNow + timeout;
         _blinkOn = false;
         _blink.Start();
         _tray.Text = Truncate(TooltipText());
@@ -349,13 +386,13 @@ internal sealed class TrayApp : IDisposable
         _menu.Items.Add(connect);
         _menu.Items.Add(new ToolStripMenuItem("Отключить", null, (_, _) => DisconnectSelected())
         {
-            Enabled = !_busy && !Disconnecting && sel is { Connected: true },
+            Enabled = !_busy && !Disconnecting && !OtherDisconnecting && sel is { Connected: true },
         });
         _menu.Items.Add(new ToolStripSeparator());
 
         var choose = new ToolStripMenuItem("Выбрать устройство");
         List<BtDevice>? devices;
-        try { devices = Bluetooth.GetPairedDevices() ?? _devices; }
+        try { devices = WithAudioState(Bluetooth.GetPairedDevices(), _lastAudio.Address, _lastAudio.Audio) ?? _devices; }
         catch { devices = _devices; }   // стек Bluetooth недоступен — показываем последний опрос
         if (devices == null || devices.Count == 0)
         {
@@ -450,12 +487,15 @@ internal sealed class TrayApp : IDisposable
             {
                 using var form = _hotkeyForm = new HotkeyForm(_hotkeys, _settings.Hotkey);
                 if (error != null) form.ShowError(error);
+                _hotkeyActive = false;   // окно записи сняло регистрацию — подсказка не должна обещать кнопку
+                _tray.Text = Truncate(TooltipText());
                 var result = form.ShowDialog();
                 _hotkeyForm = null;
 
                 if (result != DialogResult.OK)
                 {
                     _hotkeyActive = _hotkeys.Apply(_settings.Hotkey, out string restoreErr) && _settings.Hotkey != null;
+                    _tray.Text = Truncate(TooltipText());
                     if (_settings.Hotkey != null && !_hotkeyActive)   // вернуть прежнее назначение не удалось
                         Balloon("Кнопка подключить/отключить не работает", restoreErr, ToolTipIcon.Warning);
                     return;
@@ -465,6 +505,7 @@ internal sealed class TrayApp : IDisposable
                 {
                     _settings.Hotkey = chosen;
                     _hotkeyActive = chosen != null;
+                    _tray.Text = Truncate(TooltipText());
                     TrySave();
                     if (chosen != null)
                         Balloon("Кнопка назначена", $"{chosen} — подключить или отключить {_settings.Name ?? "выбранное устройство"}.", ToolTipIcon.Info);

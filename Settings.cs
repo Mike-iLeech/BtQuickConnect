@@ -30,9 +30,15 @@ internal sealed class Settings
     public void Save()
     {
         Directory.CreateDirectory(Dir);
-        // через временный файл: оборванная запись (убитый процесс, сбой питания) не портит настройки
+        // через временный файл: оборванная запись (убитый процесс, сбой питания) не портит настройки;
+        // Flush(true) — данные на диске раньше, чем переименование попадёт в журнал NTFS
         string tmp = FilePath + ".tmp";
-        File.WriteAllText(tmp, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+        byte[] data = JsonSerializer.SerializeToUtf8Bytes(this, new JsonSerializerOptions { WriteIndented = true });
+        using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            fs.Write(data);
+            fs.Flush(flushToDisk: true);
+        }
         File.Move(tmp, FilePath, overwrite: true);
     }
 }

@@ -123,6 +123,17 @@ public class DisconnectStateTests
     }
 
     [Fact]
+    public void FailedAnswerAfterLimit_ClearsAtOnce()
+    {
+        // ответ «не удалось» пришёл позже лимита, устройство так и подключено — ждать погасания нечего
+        var d = new DisconnectState();
+        int op = d.Begin(A, T0);
+        var late = T0 + DisconnectState.InFlightLimit + TimeSpan.FromSeconds(1);
+        d.Finished(op, late, failed: true);
+        Assert.False(d.Active(A, late));
+    }
+
+    [Fact]
     public void AnswerAfterLimit_DoesNotBlockReconnectedDevice()
     {
         // завис дольше лимита → опрос увидел отключение → пользователь подключил заново → старый ответ пришёл

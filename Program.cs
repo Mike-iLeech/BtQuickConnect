@@ -25,7 +25,12 @@ internal static class Program
                 {
                     // «готово» — только когда цикл сообщений реально заработал; старая версия ждёт этого, чтобы выйти
                     EventHandler? onIdle = null;
-                    onIdle = (_, _) => { Application.Idle -= onIdle; Updater.SignalReady(); };
+                    onIdle = (_, _) =>
+                    {
+                        Application.Idle -= onIdle;
+                        try { Updater.SignalReady(); }
+                        catch { /* не дождётся — старая версия откатит обновление, это лучше окна ошибки */ }
+                    };
                     Application.Idle += onIdle;
                 }
                 Task.Run(Updater.Cleanup);

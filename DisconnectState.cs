@@ -36,6 +36,7 @@ internal sealed class DisconnectState
             // ответ пришёл позже лимита: ожидание уже сняли, устройство могли подключить заново —
             // не вешаем «отключение…» на подключённое устройство
             _inFlight = false;
+            if (failed) _settleUntil = DateTime.MinValue;   // отключение не удалось — огонёк и не погаснет
             return;
         }
         _inFlight = false;

@@ -61,17 +61,37 @@ internal static class Bluetooth
     private static BLUETOOTH_DEVICE_INFO NewInfo() =>
         new() { dwSize = (uint)Marshal.SizeOf<BLUETOOTH_DEVICE_INFO>(), szName = "" };
 
+    // Подключение — во все профили: если послать только в первый KS-фильтр, а им окажется
+    // Hands-Free, поднимется одна гарнитура без стерео (замер 20.10: стерео так и не подключилось).
     public static KsResult Connect(string address, out string error) =>
-        SendOneShot(address, KSPROPERTY_ONESHOT_RECONNECT, stopOnFirst: true, out error);
+        SendOneShot(address, KSPROPERTY_ONESHOT_RECONNECT, out error);
 
     public static KsResult Disconnect(string address, out string error) =>
-        SendOneShot(address, KSPROPERTY_ONESHOT_DISCONNECT, stopOnFirst: false, out error);
+        SendOneShot(address, KSPROPERTY_ONESHOT_DISCONNECT, out error);
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Guid> Containers =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Есть ли звук: активно ли хоть одно аудиоустройство Windows этого Bluetooth-устройства.
+    /// null — устройство не аудио (или не найдено): тогда о подключении судим по радиосоединению.
+    /// Аудио гаснет через ~0,3 с после отключения, а радиосоединение Windows держит ещё ~3 с.
+    /// </summary>
+    public static bool? AudioConnected(string address)
+    {
+        if (!Containers.TryGetValue(address, out Guid container))
+        {
+            if (FindContainerId(address) is not { } found) return null;   // не кешируем: могут спарить позже
+            Containers[address] = container = found;
+        }
+        return AudioEndpoints.AnyActive(container);
+    }
 
     /// <summary>
     /// Тот же запрос, что посылает кнопка «Подключить»/«Отключить» в параметрах Windows:
     /// свойство KSPROPSETID_BtAudio у KS-фильтров аудиодрайвера этого устройства.
     /// </summary>
-    private static KsResult SendOneShot(string address, uint propId, bool stopOnFirst, out string error)
+    private static KsResult SendOneShot(string address, uint propId, out string error)
     {
         error = "";
         Guid? container = FindContainerId(address);
@@ -102,10 +122,7 @@ internal static class Bluetooth
             var prop = new KSPROPERTY { Set = KSPROPSETID_BtAudio, Id = propId, Flags = KSPROPERTY_TYPE_GET };
             if (DeviceIoControl(h, IOCTL_KS_PROPERTY, ref prop, Marshal.SizeOf<KSPROPERTY>(),
                     IntPtr.Zero, 0, out _, IntPtr.Zero))
-            {
                 any = true;
-                if (stopOnFirst) break;
-            }
             else lastErr = Marshal.GetLastWin32Error();
         }
 
@@ -115,7 +132,7 @@ internal static class Bluetooth
     }
 
     /// <summary>ContainerId узла BTHENUM\DEV_&lt;адрес&gt; — общий для всех профилей и аудиоузлов устройства.</summary>
-    private static Guid? FindContainerId(string address)
+    internal static Guid? FindContainerId(string address)
     {
         string prefix = @"BTHENUM\DEV_" + address.ToUpperInvariant() + @"\";
         IntPtr set = SetupDiGetClassDevsW(IntPtr.Zero, "BTHENUM", IntPtr.Zero, DIGCF_ALLCLASSES);
@@ -147,7 +164,7 @@ internal static class Bluetooth
     }
 
     /// <summary>Пути KS-фильтров категории AUDIO, принадлежащих тому же контейнеру (A2DP и Hands-Free).</summary>
-    private static List<string> FindAudioFilters(Guid container)
+    internal static List<string> FindAudioFilters(Guid container)
     {
         var result = new List<string>();
         Guid cat = KSCATEGORY_AUDIO;
