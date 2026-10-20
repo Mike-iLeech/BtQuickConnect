@@ -21,9 +21,8 @@ internal sealed class TrayApp : IDisposable
     private int _polling;
     private bool _busy;               // идёт подключение/отключение
     private DateTime _connectDeadline;
-    private DateTime _disconnectUntil = DateTime.MinValue;   // отключение отправлено, огонёк ещё может быть зелёным
-    private bool _disconnectInFlight;                         // Bluetooth.Disconnect ещё обходит профили устройства
-    private bool Disconnecting => _disconnectInFlight || DateTime.Now < _disconnectUntil;
+    private readonly DisconnectState _disconnect = new();
+    private bool Disconnecting => _disconnect.Active(_settings.Address, DateTime.Now);
     private bool _blinkOn;
 
     private static readonly TimeSpan UpdateInterval = TimeSpan.FromHours(6);
@@ -178,7 +177,7 @@ internal sealed class TrayApp : IDisposable
         _state = sel == null ? LedState.Red : sel.Connected ? LedState.Green : LedState.Orange;
 
         if (_busy && _state == LedState.Green) StopBusy();
-        if (_state != LedState.Green && !_disconnectInFlight) _disconnectUntil = DateTime.MinValue;   // отключение завершилось
+        _disconnect.Observe(_settings.Address, sel?.Connected == true, DateTime.Now);
         if (_busy && DateTime.Now > _connectDeadline)
         {
             StopBusy();
@@ -196,7 +195,7 @@ internal sealed class TrayApp : IDisposable
         if (_settings.Address == null) return "Устройство не выбрано — ПКМ → «Выбрать устройство»";
         string name = _settings.Name ?? _settings.Address;
         if (_busy) return $"{name}: подключение…";
-        if (Disconnecting && _state == LedState.Green) return $"{name}: отключение…";
+        if (Disconnecting) return $"{name}: отключение…";
         return _state switch
         {
             LedState.Green => $"{name}: подключено (двойной клик" + (_settings.Hotkey != null ? " или кнопка" : "") + " — отключить)",
@@ -228,7 +227,7 @@ internal sealed class TrayApp : IDisposable
 
     private void ConnectSelected()
     {
-        if (_busy || _disconnectInFlight) return;   // не подключаем, пока отключение ещё рвёт профили
+        if (_busy || Disconnecting) return;   // не подключаем, пока отключение ещё рвёт профили
         if (_settings.Address == null)
         {
             Balloon("Устройство не выбрано", "Щёлкните правой кнопкой по значку → «Выбрать устройство».", ToolTipIcon.Info);
@@ -252,7 +251,10 @@ internal sealed class TrayApp : IDisposable
         StartBusy(TimeSpan.FromSeconds(20));
         Task.Run(() =>
         {
-            var r = Bluetooth.Connect(addr, out string err);
+            KsResult r;
+            string err;
+            try { r = Bluetooth.Connect(addr, out err); }
+            catch (Exception e) { r = KsResult.Failed; err = e.Message; }   // иначе 20 с ложного «подключение…»
             _ui.Post(_ =>
             {
                 if (r != KsResult.Ok)
@@ -267,21 +269,23 @@ internal sealed class TrayApp : IDisposable
 
     private void DisconnectSelected()
     {
-        if (_busy || _disconnectInFlight || Selected is not { Connected: true } sel) return;
+        if (_busy || Disconnecting || Selected is not { Connected: true } sel) return;
         string addr = sel.Address;
         // пока Windows рвёт связь, огонёк ещё зелёный — повторное нажатие не должно снова слать отключение
-        _disconnectUntil = DateTime.Now.AddSeconds(10);
-        _disconnectInFlight = true;
+        _disconnect.Begin(addr, DateTime.Now);
         _tray.Text = Truncate(TooltipText());
         Task.Run(() =>
         {
-            var r = Bluetooth.Disconnect(addr, out string err);
+            KsResult r;
+            string err;
+            try { r = Bluetooth.Disconnect(addr, out err); }
+            catch (Exception e) { r = KsResult.Failed; err = e.Message; }   // ответ в UI должен прийти всегда
             _ui.Post(_ =>
             {
-                _disconnectInFlight = false;
+                _disconnect.Finished(DateTime.Now, failed: r != KsResult.Ok);
+                _tray.Text = Truncate(TooltipText());
                 if (r != KsResult.Ok)
                 {
-                    _disconnectUntil = DateTime.MinValue;
                     Balloon("Не удалось отключить", err, ToolTipIcon.Warning);
                 }
                 Task.Run(Poll);
@@ -337,13 +341,13 @@ internal sealed class TrayApp : IDisposable
 
         var connect = new ToolStripMenuItem("Подключить", null, (_, _) => ConnectSelected())
         {
-            Enabled = !_busy && sel is { Connected: false },
+            Enabled = !_busy && !Disconnecting && sel is { Connected: false },
             Font = _boldFont,
         };
         _menu.Items.Add(connect);
         _menu.Items.Add(new ToolStripMenuItem("Отключить", null, (_, _) => DisconnectSelected())
         {
-            Enabled = !_busy && sel is { Connected: true },
+            Enabled = !_busy && !Disconnecting && sel is { Connected: true },
         });
         _menu.Items.Add(new ToolStripSeparator());
 
@@ -425,7 +429,6 @@ internal sealed class TrayApp : IDisposable
 
     private void Select(BtDevice? d)
     {
-        _disconnectUntil = DateTime.MinValue;   // ожидание отключения относилось к прежнему устройству
         _settings.Address = d?.Address;
         _settings.Name = d?.Name;
         TrySave();

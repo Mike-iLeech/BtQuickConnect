@@ -108,7 +108,7 @@ internal sealed class HotkeyBinding
 }
 
 /// <summary>
-/// Глобальная кнопка подключения: клавиши — через RegisterHotKey,
+/// Глобальная кнопка подключить/отключить: клавиши — через RegisterHotKey,
 /// кнопки мыши — через низкоуровневый хук (нажатие «съедается», чтобы браузер не листал назад).
 /// </summary>
 internal sealed class HotkeyManager : NativeWindow, IDisposable
