@@ -21,7 +21,9 @@ internal sealed class TrayApp : IDisposable
     private int _polling;
     private bool _busy;               // идёт подключение/отключение
     private DateTime _connectDeadline;
-    private DateTime _disconnectUntil = DateTime.MinValue;   // идёт отключение
+    private DateTime _disconnectUntil = DateTime.MinValue;   // отключение отправлено, огонёк ещё может быть зелёным
+    private bool _disconnectInFlight;                         // Bluetooth.Disconnect ещё обходит профили устройства
+    private bool Disconnecting => _disconnectInFlight || DateTime.Now < _disconnectUntil;
     private bool _blinkOn;
 
     private static readonly TimeSpan UpdateInterval = TimeSpan.FromHours(6);
@@ -66,7 +68,7 @@ internal sealed class TrayApp : IDisposable
         _hotkeys = new HotkeyManager(_ui);
         _hotkeys.Pressed += ToggleSelected;
         if (!_hotkeys.Apply(_settings.Hotkey, out string hkErr))
-            Balloon("Кнопка подключения не работает", hkErr + " Назначьте другую через меню.", ToolTipIcon.Warning);
+            Balloon("Кнопка подключить/отключить не работает", hkErr + " Назначьте другую через меню.", ToolTipIcon.Warning);
         else if (rolledBack != null)
             Balloon("Обновление отменено",
                 $"Версия {_rolledBack?.ToString(3) ?? rolledBack} не запустилась — возвращена {Updater.Current.ToString(3)}.",
@@ -124,7 +126,7 @@ internal sealed class TrayApp : IDisposable
     {
         // не перезапускаемся посреди подключения или записи кнопки — дождёмся следующей проверки
         if (_updating || Handoff != null || Updater.ExePath is not { } exe) return;
-        if (!manual && (_busy || _hotkeyForm != null)) return;
+        if (!manual && (_busy || Disconnecting || _hotkeyForm != null)) return;
 
         _updating = true;
         try
@@ -176,7 +178,7 @@ internal sealed class TrayApp : IDisposable
         _state = sel == null ? LedState.Red : sel.Connected ? LedState.Green : LedState.Orange;
 
         if (_busy && _state == LedState.Green) StopBusy();
-        if (_state != LedState.Green) _disconnectUntil = DateTime.MinValue;   // отключение завершилось
+        if (_state != LedState.Green && !_disconnectInFlight) _disconnectUntil = DateTime.MinValue;   // отключение завершилось
         if (_busy && DateTime.Now > _connectDeadline)
         {
             StopBusy();
@@ -194,6 +196,7 @@ internal sealed class TrayApp : IDisposable
         if (_settings.Address == null) return "Устройство не выбрано — ПКМ → «Выбрать устройство»";
         string name = _settings.Name ?? _settings.Address;
         if (_busy) return $"{name}: подключение…";
+        if (Disconnecting && _state == LedState.Green) return $"{name}: отключение…";
         return _state switch
         {
             LedState.Green => $"{name}: подключено (двойной клик" + (_settings.Hotkey != null ? " или кнопка" : "") + " — отключить)",
@@ -216,7 +219,7 @@ internal sealed class TrayApp : IDisposable
     /// <summary>Двойной клик и назначенная кнопка переключают: подключают отключённое устройство и отключают подключённое.</summary>
     private void ToggleSelected()
     {
-        switch (DecideToggle(Selected?.Connected == true, _busy, DateTime.Now < _disconnectUntil))
+        switch (DecideToggle(Selected?.Connected == true, _busy, Disconnecting))
         {
             case ToggleAction.Connect: ConnectSelected(); break;
             case ToggleAction.Disconnect: DisconnectSelected(); break;
@@ -225,7 +228,7 @@ internal sealed class TrayApp : IDisposable
 
     private void ConnectSelected()
     {
-        if (_busy) return;
+        if (_busy || _disconnectInFlight) return;   // не подключаем, пока отключение ещё рвёт профили
         if (_settings.Address == null)
         {
             Balloon("Устройство не выбрано", "Щёлкните правой кнопкой по значку → «Выбрать устройство».", ToolTipIcon.Info);
@@ -264,15 +267,18 @@ internal sealed class TrayApp : IDisposable
 
     private void DisconnectSelected()
     {
-        if (_busy || Selected is not { Connected: true } sel) return;
+        if (_busy || _disconnectInFlight || Selected is not { Connected: true } sel) return;
         string addr = sel.Address;
         // пока Windows рвёт связь, огонёк ещё зелёный — повторное нажатие не должно снова слать отключение
         _disconnectUntil = DateTime.Now.AddSeconds(10);
+        _disconnectInFlight = true;
+        _tray.Text = Truncate(TooltipText());
         Task.Run(() =>
         {
             var r = Bluetooth.Disconnect(addr, out string err);
             _ui.Post(_ =>
             {
+                _disconnectInFlight = false;
                 if (r != KsResult.Ok)
                 {
                     _disconnectUntil = DateTime.MinValue;
@@ -419,6 +425,7 @@ internal sealed class TrayApp : IDisposable
 
     private void Select(BtDevice? d)
     {
+        _disconnectUntil = DateTime.MinValue;   // ожидание отключения относилось к прежнему устройству
         _settings.Address = d?.Address;
         _settings.Name = d?.Name;
         TrySave();
@@ -444,7 +451,7 @@ internal sealed class TrayApp : IDisposable
                 if (result != DialogResult.OK)
                 {
                     if (!_hotkeys.Apply(_settings.Hotkey, out string restoreErr))   // вернуть прежнее назначение
-                        Balloon("Кнопка подключения не работает", restoreErr, ToolTipIcon.Warning);
+                        Balloon("Кнопка подключить/отключить не работает", restoreErr, ToolTipIcon.Warning);
                     return;
                 }
                 var chosen = form.Cleared ? null : form.Result;

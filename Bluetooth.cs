@@ -84,7 +84,9 @@ internal static class Bluetooth
         var paths = FindAudioFilters(container.Value);
         if (paths.Count == 0)
         {
-            error = "У устройства нет аудиопрофиля: Windows не умеет подключать такие устройства со стороны ПК. "
+            error = propId == KSPROPERTY_ONESHOT_DISCONNECT
+                ? "У устройства нет аудиопрофиля: отключить его отсюда нельзя. Выключите само устройство."
+                : "У устройства нет аудиопрофиля: Windows не умеет подключать такие устройства со стороны ПК. "
                   + "Включите его — оно подключится само.";
             return KsResult.NotAudio;
         }
