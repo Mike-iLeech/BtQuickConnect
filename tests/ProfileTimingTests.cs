@@ -47,6 +47,25 @@ public class ProfileTimingTests
     public void ShowAsDisconnected(bool connected, bool? audio, bool settling, bool expected) =>
         Assert.Equal(expected, TrayApp.ShowAsDisconnected(connected, audio, settling));
 
+    // ---------- цвет огонька целиком (ошибка 20.10: отключённое устройство горело зелёным) ----------
+
+    private static BtDevice Dev(bool connected) => new(A, "OnePlus Buds 3", connected, true);
+
+    [Theory]
+    [InlineData(false, null, false, LedState.Orange)]   // отключено, звук не понять — оранжевый
+    [InlineData(false, false, false, LedState.Orange)]  // отключено, звука нет
+    [InlineData(false, null, true, LedState.Orange)]
+    [InlineData(false, false, true, LedState.Orange)]
+    [InlineData(true, true, false, LedState.Green)]
+    [InlineData(true, null, false, LedState.Green)]     // неаудио/выключено в панели — по радио
+    [InlineData(true, true, true, LedState.Green)]      // звук вернулся сам — не прячем
+    [InlineData(true, null, true, LedState.Orange)]     // успешно отключили, радио ещё держится
+    public void LedFor_Selected(bool connected, bool? audio, bool settling, object expected) =>
+        Assert.Equal((LedState)expected, TrayApp.LedFor(Dev(connected), audio, settling));
+
+    [Fact]
+    public void LedFor_NothingSelected_Red() => Assert.Equal(LedState.Red, TrayApp.LedFor(null, null, false));
+
     [Fact]
     public void Settling_OnlyAfterSuccess()
     {

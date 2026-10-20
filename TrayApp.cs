@@ -206,6 +206,15 @@ internal sealed class TrayApp : IDisposable
     internal static bool ShowAsDisconnected(bool connected, bool? audio, bool settling) =>
         connected && audio == null && settling;
 
+    /// <summary>
+    /// Цвет огонька: не выбрано / не спарено / BT выключен — красный; подключено (и не «уже отключено»
+    /// после успешной команды) — зелёный; иначе оранжевый. sel.Connected уже учитывает звук (WithAudioState).
+    /// </summary>
+    internal static LedState LedFor(BtDevice? sel, bool? audio, bool settling) =>
+        sel == null ? LedState.Red
+        : sel.Connected && !ShowAsDisconnected(sel.Connected, audio, settling) ? LedState.Green
+        : LedState.Orange;
+
     /// <summary>Пока идёт подключение или отключение, опрашиваем часто — огонёк меняется сразу.</summary>
     private void SetFastPoll(bool fast)
     {
@@ -233,9 +242,7 @@ internal sealed class TrayApp : IDisposable
         var now = DateTime.UtcNow;
         var audio = _lastAudio.Address != null && sel != null
             && _lastAudio.Address.Equals(sel.Address, StringComparison.OrdinalIgnoreCase) ? _lastAudio.Audio : null;
-        bool shownConnected = sel != null && !ShowAsDisconnected(sel.Connected, audio?.Connected,
-            _disconnect.Settling(_settings.Address, now));
-        _state = sel == null ? LedState.Red : shownConnected ? LedState.Green : LedState.Orange;
+        _state = LedFor(sel, audio?.Connected, _disconnect.Settling(_settings.Address, now));
 
         if (_busy && _state == LedState.Green)
         {
