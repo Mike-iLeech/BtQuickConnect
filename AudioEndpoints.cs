@@ -7,6 +7,10 @@ namespace BtQuickConnect;
 /// Их состояние меняется сразу, как профиль подключился или отключился, а радиосоединение (ACL),
 /// которое видит BluetoothFindFirstDevice, Windows держит после отключения звука ещё ~3 с.
 /// </summary>
+/// <summary>Звук устройства: Connected — есть ли (null — не понять по аудиоустройствам);
+/// AllUp — не осталось отключённых профилей (стерео и гарнитура подняты).</summary>
+internal sealed record AudioState(bool? Connected, bool AllUp);
+
 internal static class AudioEndpoints
 {
     private const int DEVICE_STATE_ACTIVE = 1;
@@ -34,13 +38,15 @@ internal static class AudioEndpoints
         return unplugged && !disabled ? false : null;
     }
 
-    /// <summary>null — у устройства нет живых аудиоустройств Windows; иначе — есть ли звук.</summary>
-    public static bool? AnyActive(Guid container)
+    /// <summary>Все ли профили подняты: среди аудиоустройств нет отключённых (UNPLUGGED).</summary>
+    internal static bool AllUp(IEnumerable<int> states) => !states.Contains(DEVICE_STATE_UNPLUGGED);
+
+    public static AudioState Read(Guid container)
     {
         var en = (IMMDeviceEnumerator)new MMDeviceEnumeratorCom();
         try
         {
-            if (en.EnumAudioEndpoints(eAll, DEVICE_STATEMASK_ALL, out var col) != 0) return null;
+            if (en.EnumAudioEndpoints(eAll, DEVICE_STATEMASK_ALL, out var col) != 0) return new AudioState(null, true);
             try
             {
                 col.GetCount(out uint n);
@@ -55,7 +61,7 @@ internal static class AudioEndpoints
                     }
                     finally { Marshal.ReleaseComObject(dev); }
                 }
-                return Evaluate(states);
+                return new AudioState(Evaluate(states), AllUp(states));
             }
             finally { Marshal.ReleaseComObject(col); }
         }

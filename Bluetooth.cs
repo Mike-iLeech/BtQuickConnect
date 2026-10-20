@@ -79,18 +79,18 @@ internal static class Bluetooth
     /// null — устройство не аудио (или не найдено): тогда о подключении судим по радиосоединению.
     /// Аудио гаснет через ~0,3 с после отключения, а радиосоединение Windows держит ещё ~3 с.
     /// </summary>
-    public static bool? AudioConnected(string address, bool radioConnected)
+    public static AudioState? ReadAudio(string address, bool radioConnected)
     {
         if (!Containers.TryGetValue(address, out Guid container))
         {
             if (FindContainerId(address) is not { } found) return null;   // не кешируем: могут спарить позже
             Containers[address] = container = found;
         }
-        bool? audio = AudioEndpoints.AnyActive(container);
-        // живых аудиоустройств у контейнера нет, а радиосоединение есть — возможно, устройство спарили
-        // заново и ContainerId сменился (старые записи стали NOTPRESENT): найдём его заново,
-        // но не чаще раза в 10 с — у неаудиоустройств так будет всегда
-        if (audio == null && radioConnected)
+        var audio = AudioEndpoints.Read(container);
+        // звука нет, а радиосоединение есть — возможно, устройство спарили заново и ContainerId сменился
+        // (старые записи NOTPRESENT или UNPLUGGED): найдём его заново, но не чаще раза в 10 с —
+        // во время отключения это один лишний поиск, у неаудиоустройств — раз в 10 с
+        if (audio.Connected != true && radioConnected)
         {
             var now = DateTime.UtcNow;
             if (!LastForget.TryGetValue(address, out var last) || now - last > TimeSpan.FromSeconds(10))

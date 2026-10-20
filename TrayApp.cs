@@ -20,7 +20,9 @@ internal sealed class TrayApp : IDisposable
     private LedState _state = LedState.Red;
     private int _polling;
     private int _pollPeriod = 2000;
-    private (string? Address, bool? Audio) _lastAudio;   // последний замер звука — для списка в меню
+    private (string? Address, AudioState? Audio) _lastAudio;   // последний замер звука выбранного устройства
+    private DateTime _firstUpAt = DateTime.MinValue;            // когда при подключении поднялся первый профиль
+    internal static readonly TimeSpan AllProfilesWait = TimeSpan.FromSeconds(3);
     private bool _busy;               // идёт подключение/отключение
     private DateTime _connectDeadline;
     private readonly DisconnectState _disconnect = new();
@@ -161,14 +163,14 @@ internal sealed class TrayApp : IDisposable
         {
             var devices = Bluetooth.GetPairedDevices();
             string? addr = _settings.Address;
-            bool? audio = null;
+            AudioState? audio = null;
             if (addr != null && devices != null)
             {
                 bool radio = devices.Any(d => d.Connected && d.Address.Equals(addr, StringComparison.OrdinalIgnoreCase));
-                try { audio = Bluetooth.AudioConnected(addr, radio); }
+                try { audio = Bluetooth.ReadAudio(addr, radio); }
                 catch { /* аудиоподсистема недоступна — судим по радиосоединению */ }
             }
-            _ui.Post(_ => { _lastAudio = (addr, audio); Apply(WithAudioState(devices, addr, audio)); }, null);
+            _ui.Post(_ => { _lastAudio = (addr, audio); Apply(WithAudioState(devices, addr, audio?.Connected)); }, null);
         }
         catch
         {
@@ -189,6 +191,20 @@ internal sealed class TrayApp : IDisposable
         return devices.Select(d => d.Address.Equals(address, StringComparison.OrdinalIgnoreCase)
             ? d with { Connected = audio.Value } : d).ToList();
     }
+
+    /// <summary>
+    /// Подключение закончено: подняты все профили (стерео тоже), либо звук не определить по
+    /// аудиоустройствам, либо с первого профиля прошло 3 с (какой-то профиль так и не поднимется).
+    /// </summary>
+    internal static bool ConnectDone(AudioState? audio, TimeSpan sinceFirstUp) =>
+        audio?.Connected != true || audio.AllUp || sinceFirstUp >= AllProfilesWait;
+
+    /// <summary>
+    /// Отключение прошло успешно, а звук по аудиоустройствам не понять (выключены в панели звука):
+    /// показываем «отключено» сразу, не дожидаясь, пока Windows разорвёт радиосоединение (~3 с).
+    /// </summary>
+    internal static bool ShowAsDisconnected(bool connected, bool? audio, bool settling) =>
+        connected && audio == null && settling;
 
     /// <summary>Пока идёт подключение или отключение, опрашиваем часто — огонёк меняется сразу.</summary>
     private void SetFastPoll(bool fast)
@@ -214,10 +230,20 @@ internal sealed class TrayApp : IDisposable
             TrySave();
         }
 
-        _state = sel == null ? LedState.Red : sel.Connected ? LedState.Green : LedState.Orange;
+        var now = DateTime.UtcNow;
+        var audio = _lastAudio.Address != null && sel != null
+            && _lastAudio.Address.Equals(sel.Address, StringComparison.OrdinalIgnoreCase) ? _lastAudio.Audio : null;
+        bool shownConnected = sel != null && !ShowAsDisconnected(sel.Connected, audio?.Connected,
+            _disconnect.Settling(_settings.Address, now));
+        _state = sel == null ? LedState.Red : shownConnected ? LedState.Green : LedState.Orange;
 
-        if (_busy && _state == LedState.Green) StopBusy();
-        _disconnect.Observe(_settings.Address, sel?.Connected == true, DateTime.UtcNow);
+        if (_busy && _state == LedState.Green)
+        {
+            if (_firstUpAt == DateTime.MinValue) _firstUpAt = now;
+            if (ConnectDone(audio, now - _firstUpAt)) StopBusy();
+        }
+        // по настоящему состоянию, а не по показанному: иначе оптимистичный оранжевый сам снимал бы ожидание
+        _disconnect.Observe(_settings.Address, sel?.Connected == true, now);
         if (_busy && DateTime.UtcNow > _connectDeadline)
         {
             StopBusy();
@@ -339,6 +365,7 @@ internal sealed class TrayApp : IDisposable
 
     private void StartBusy(TimeSpan timeout)
     {
+        _firstUpAt = DateTime.MinValue;
         SetFastPoll(true);
         _busy = true;
         _connectDeadline = DateTime.UtcNow + timeout;
@@ -398,7 +425,7 @@ internal sealed class TrayApp : IDisposable
 
         var choose = new ToolStripMenuItem("Выбрать устройство");
         List<BtDevice>? devices;
-        try { devices = WithAudioState(Bluetooth.GetPairedDevices(), _lastAudio.Address, _lastAudio.Audio) ?? _devices; }
+        try { devices = WithAudioState(Bluetooth.GetPairedDevices(), _lastAudio.Address, _lastAudio.Audio?.Connected) ?? _devices; }
         catch { devices = _devices; }   // стек Bluetooth недоступен — показываем последний опрос
         if (devices == null || devices.Count == 0)
         {

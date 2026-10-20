@@ -14,6 +14,7 @@ internal sealed class DisconnectState
     private string? _address;
     private int _generation;
     private bool _inFlight;
+    private bool _succeeded;   // Disconnect вернул «готово» в срок
     private DateTime _inFlightUntil = DateTime.MinValue;
     private DateTime _settleUntil = DateTime.MinValue;
 
@@ -22,6 +23,7 @@ internal sealed class DisconnectState
     {
         _address = address;
         _inFlight = true;
+        _succeeded = false;
         _inFlightUntil = now + InFlightLimit;
         _settleUntil = now + InFlightLimit + SettleLimit;
         return ++_generation;
@@ -40,6 +42,7 @@ internal sealed class DisconnectState
             return;
         }
         _inFlight = false;
+        _succeeded = !failed;
         _settleUntil = failed ? DateTime.MinValue : now + SettleLimit;
     }
 
@@ -50,6 +53,10 @@ internal sealed class DisconnectState
     }
 
     public bool InFlight(DateTime now) => _inFlight && now < _inFlightUntil;
+
+    /// <summary>Отключение этого устройства прошло успешно, ждём, пока Windows разорвёт радиосоединение.</summary>
+    public bool Settling(string? address, DateTime now) =>
+        Matches(address) && _succeeded && !InFlight(now) && now < _settleUntil;
 
     /// <summary>Идёт ли отключение именно этого устройства.</summary>
     public bool Active(string? address, DateTime now) =>
