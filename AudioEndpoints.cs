@@ -10,11 +10,28 @@ namespace BtQuickConnect;
 internal static class AudioEndpoints
 {
     private const int DEVICE_STATE_ACTIVE = 1;
+    private const int DEVICE_STATE_UNPLUGGED = 8;
     private const int DEVICE_STATEMASK_ALL = 0xF;
     private const int eAll = 2;
     private const ushort VT_CLSID = 72;
 
-    /// <summary>null — у устройства нет аудиоустройств Windows; иначе — активно ли хоть одно.</summary>
+    /// <summary>
+    /// Есть ли звук по состояниям аудиоустройств: ACTIVE — да; только UNPLUGGED — нет.
+    /// DISABLED (выключено в панели звука) и NOTPRESENT (старые записи) о подключении ничего не говорят:
+    /// если «живых» нет, null — тогда судим по радиосоединению.
+    /// </summary>
+    internal static bool? Evaluate(IEnumerable<int> states)
+    {
+        bool unplugged = false;
+        foreach (int s in states)
+        {
+            if (s == DEVICE_STATE_ACTIVE) return true;
+            if (s == DEVICE_STATE_UNPLUGGED) unplugged = true;
+        }
+        return unplugged ? false : null;
+    }
+
+    /// <summary>null — у устройства нет живых аудиоустройств Windows; иначе — есть ли звук.</summary>
     public static bool? AnyActive(Guid container)
     {
         var en = (IMMDeviceEnumerator)new MMDeviceEnumeratorCom();
@@ -24,19 +41,18 @@ internal static class AudioEndpoints
             try
             {
                 col.GetCount(out uint n);
-                bool found = false;
+                var states = new List<int>();
                 for (uint i = 0; i < n; i++)
                 {
                     if (col.Item(i, out var dev) != 0) continue;
                     try
                     {
                         if (ContainerOf(dev) != container) continue;
-                        found = true;
-                        if (dev.GetState(out int st) == 0 && st == DEVICE_STATE_ACTIVE) return true;
+                        if (dev.GetState(out int st) == 0) states.Add(st);
                     }
                     finally { Marshal.ReleaseComObject(dev); }
                 }
-                return found ? false : null;
+                return Evaluate(states);
             }
             finally { Marshal.ReleaseComObject(col); }
         }

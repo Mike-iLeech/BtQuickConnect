@@ -77,14 +77,24 @@ internal static class Bluetooth
     /// null — устройство не аудио (или не найдено): тогда о подключении судим по радиосоединению.
     /// Аудио гаснет через ~0,3 с после отключения, а радиосоединение Windows держит ещё ~3 с.
     /// </summary>
-    public static bool? AudioConnected(string address)
+    public static bool? AudioConnected(string address, bool radioConnected)
     {
         if (!Containers.TryGetValue(address, out Guid container))
         {
             if (FindContainerId(address) is not { } found) return null;   // не кешируем: могут спарить позже
             Containers[address] = container = found;
         }
-        return AudioEndpoints.AnyActive(container);
+        bool? audio = AudioEndpoints.AnyActive(container);
+        // звука нет при живом радиосоединении — возможно, устройство спарили заново и ContainerId
+        // сменился: следующий опрос найдёт его заново (во время отключения это ~3 лишних поиска)
+        if (audio != true && radioConnected) Containers.TryRemove(address, out _);
+        return audio;
+    }
+
+    /// <summary>Сбросить запомненный ContainerId (смена устройства, повторное спаривание).</summary>
+    public static void ForgetContainer(string? address)
+    {
+        if (address != null) Containers.TryRemove(address, out _);
     }
 
     /// <summary>
@@ -95,6 +105,7 @@ internal static class Bluetooth
     {
         error = "";
         Guid? container = FindContainerId(address);
+        if (container != null) Containers[address] = container.Value;   // заодно освежаем кеш опроса
         if (container == null)
         {
             error = "Устройство не найдено в системе — возможно, оно больше не спарено.";

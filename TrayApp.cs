@@ -164,12 +164,17 @@ internal sealed class TrayApp : IDisposable
             bool? audio = null;
             if (addr != null && devices != null)
             {
-                try { audio = Bluetooth.AudioConnected(addr); }
+                bool radio = devices.Any(d => d.Connected && d.Address.Equals(addr, StringComparison.OrdinalIgnoreCase));
+                try { audio = Bluetooth.AudioConnected(addr, radio); }
                 catch { /* аудиоподсистема недоступна — судим по радиосоединению */ }
             }
             _ui.Post(_ => { _lastAudio = (addr, audio); Apply(WithAudioState(devices, addr, audio)); }, null);
         }
-        catch { /* следующий тик попробует снова */ }
+        catch
+        {
+            // опрос упал — всё равно пересчитать сроки (мигание, быстрый опрос) по последним данным
+            _ui.Post(_ => Apply(_devices), null);
+        }
         finally { Interlocked.Exchange(ref _polling, 0); }
     }
 
@@ -468,6 +473,7 @@ internal sealed class TrayApp : IDisposable
 
     private void Select(BtDevice? d)
     {
+        Bluetooth.ForgetContainer(d?.Address);
         _settings.Address = d?.Address;
         _settings.Name = d?.Name;
         TrySave();

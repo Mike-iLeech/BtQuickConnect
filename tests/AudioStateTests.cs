@@ -38,4 +38,16 @@ public class AudioStateTests
 
     [Fact]
     public void BluetoothOff_StaysNull() => Assert.Null(TrayApp.WithAudioState(null, A, true));
+
+    // состояния MMDevice: 1 ACTIVE, 2 DISABLED, 4 NOTPRESENT, 8 UNPLUGGED
+    [Theory]
+    [InlineData(new[] { 1, 8, 8 }, true)]        // есть звук
+    [InlineData(new[] { 8, 8, 8 }, false)]       // профили отключены
+    [InlineData(new[] { 2, 8 }, false)]          // одно выключено в панели звука, другое отключено
+    [InlineData(new[] { 2, 1 }, true)]
+    [InlineData(new[] { 2, 2 }, null)]           // всё выключено в панели звука — судим по радиосоединению
+    [InlineData(new[] { 4, 4 }, null)]           // старые записи после повторного спаривания
+    [InlineData(new int[0], null)]               // не аудиоустройство
+    public void Evaluate(int[] states, bool? expected) =>
+        Assert.Equal(expected, AudioEndpoints.Evaluate(states));
 }
