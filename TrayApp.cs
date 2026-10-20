@@ -33,7 +33,9 @@ internal sealed class TrayApp : IDisposable
     private bool OtherDisconnecting => !Disconnecting && _disconnect.InFlight(DateTime.UtcNow);
     private bool _blinkOn;
 
-    private static readonly TimeSpan UpdateInterval = TimeSpan.FromHours(1);
+    /// <summary>Варианты интервала в меню, в часах; 0 — не проверять.</summary>
+    internal static readonly int[] UpdateCheckChoices = { 1, 3, 6, 12, 24, 0 };
+    private static readonly TimeSpan FirstCheckDelay = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan UpdateNoticeDelay = TimeSpan.FromSeconds(8);   // успеть прочитать «найдено обновление»
     private string? _balloonUrl;   // куда ведёт щелчок по текущему уведомлению
     private readonly System.Windows.Forms.Timer _updateTimer = new() { Interval = 30_000 };
@@ -96,13 +98,35 @@ internal sealed class TrayApp : IDisposable
         // первая проверка через 30 секунд после старта, дальше раз в час
         _updateTimer.Tick += (_, _) =>
         {
-            _updateTimer.Interval = (int)UpdateInterval.TotalMilliseconds;
+            if (CheckInterval(_settings.UpdateCheckHours) is not { } every) { _updateTimer.Stop(); return; }
+            _updateTimer.Interval = (int)every.TotalMilliseconds;
             CheckUpdates(manual: false);
         };
-        if (Updater.ExePath != null) _updateTimer.Start();
+        ScheduleUpdateChecks();
     }
 
     // ---------- обновление ----------
+
+    /// <summary>Интервал проверки: null — не проверять; странные значения из файла — в пределах 1 ч … 7 сут.</summary>
+    internal static TimeSpan? CheckInterval(int hours) =>
+        hours <= 0 ? null : TimeSpan.FromHours(Math.Clamp(hours, 1, 168));
+
+    internal static string IntervalName(int hours) => hours switch
+    {
+        <= 0 => "Никогда",
+        1 => "Раз в час",
+        24 => "Раз в сутки",
+        _ => $"Раз в {hours} ч",
+    };
+
+    /// <summary>Перезапускает расписание: первая проверка через 30 с, дальше — по выбранному интервалу.</summary>
+    private void ScheduleUpdateChecks()
+    {
+        _updateTimer.Stop();
+        if (Updater.ExePath == null || CheckInterval(_settings.UpdateCheckHours) == null) return;
+        _updateTimer.Interval = (int)FirstCheckDelay.TotalMilliseconds;
+        _updateTimer.Start();
+    }
 
     private async void CheckUpdates(bool manual)
     {
@@ -153,7 +177,13 @@ internal sealed class TrayApp : IDisposable
                 ToolTipIcon.Info, r.PageUrl);
             string file = await Updater.DownloadAsync(r, exe);
             await Task.Delay(UpdateNoticeDelay);   // иначе уведомление исчезнет вместе со значком почти сразу
-            if (!manual && (_busy || Disconnecting || _hotkeyForm != null)) return;   // пока ждали, начали подключать
+            // пока ждали: начали подключать, открыли запись кнопки, выключили автообновление или проверки
+            if (!manual && (_busy || Disconnecting || _hotkeyForm != null || !_settings.AutoUpdate
+                            || CheckInterval(_settings.UpdateCheckHours) == null))
+            {
+                try { File.Delete(file); } catch { /* удалит Cleanup при следующем запуске */ }
+                return;
+            }
             Updater.SaveNotes(r);
             Handoff = Updater.InstallAndStart(file, exe, r.Version);
             Exit();
@@ -420,7 +450,9 @@ internal sealed class TrayApp : IDisposable
 
     private static void OpenUrl(string? url)
     {
-        if (string.IsNullOrEmpty(url) || !url.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase)) return;
+        // только страницы GitHub: адрес приходит из ответа API и из файла заметок
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var u) || u.Scheme != Uri.UriSchemeHttps
+            || !u.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase)) return;
         try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); }
         catch { /* нет браузера по умолчанию */ }
     }
@@ -503,7 +535,22 @@ internal sealed class TrayApp : IDisposable
         };
         _menu.Items.Add(auto);
 
-        var autoUpd = new ToolStripMenuItem("Обновлять автоматически") { Checked = _settings.AutoUpdate };
+        var checkEvery = new ToolStripMenuItem($"Проверять обновления: {IntervalName(_settings.UpdateCheckHours).ToLowerInvariant()}");
+        foreach (int hours in UpdateCheckChoices)
+        {
+            int h = hours;
+            var item = new ToolStripMenuItem(IntervalName(h)) { Checked = h == _settings.UpdateCheckHours };
+            item.Click += (_, _) =>
+            {
+                _settings.UpdateCheckHours = h;
+                TrySave();
+                ScheduleUpdateChecks();
+            };
+            checkEvery.DropDownItems.Add(item);
+        }
+        _menu.Items.Add(checkEvery);
+
+        var autoUpd = new ToolStripMenuItem("Устанавливать обновления сами") { Checked = _settings.AutoUpdate };
         autoUpd.Click += (_, _) => { _settings.AutoUpdate = !_settings.AutoUpdate; TrySave(); };
         _menu.Items.Add(autoUpd);
         if (_pendingUpdate is { } upd && Updater.IsNewer(upd))
